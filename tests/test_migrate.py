@@ -168,7 +168,7 @@ def test_reencrypt_failure_leaves_store_untouched(
         reopened.close()
     assert sidecar.load(store).salt == old_record.salt
     assert not (tmp_path / "legacy.db.reencrypt").exists()
-    assert not (tmp_path / "legacy.db.sidecar.json.reencrypt").exists()
+    assert not (tmp_path / "legacy.db.sidecar.toml.reencrypt").exists()
     assert not (tmp_path / "legacy.db.previous").exists()
 
 
@@ -188,7 +188,7 @@ def test_recover_rolls_back_incomplete_swap(tmp_path: Path) -> None:
         source.export_to(tmp_path / "legacy.db.reencrypt", new_key)
     finally:
         source.close()
-    sidecar.write(tmp_path / "legacy.db.sidecar.json.reencrypt", new_record)
+    sidecar.write(tmp_path / "legacy.db.sidecar.toml.reencrypt", new_record)
     shutil.copy(store, tmp_path / "legacy.db.previous")
     (tmp_path / "legacy.db.reencrypt").replace(store)
 
@@ -201,7 +201,7 @@ def test_recover_rolls_back_incomplete_swap(tmp_path: Path) -> None:
         reopened.close()
     assert sidecar.load(store).salt == old_record.salt
     assert not (tmp_path / "legacy.db.reencrypt").exists()
-    assert not (tmp_path / "legacy.db.sidecar.json.reencrypt").exists()
+    assert not (tmp_path / "legacy.db.sidecar.toml.reencrypt").exists()
     assert not (tmp_path / "legacy.db.previous").exists()
 
 

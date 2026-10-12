@@ -88,7 +88,6 @@ def reencrypt(
         database_description=old_sidecar.database_description,
     )
 
-
     assert new_record.salt is not None, "encrypted sidecar carries a salt"
     new_key = new_record.derive_key(new_passphrase)
 
@@ -112,6 +111,7 @@ def reencrypt(
         _rollback(store)
         raise
     _remove(backup_db)
+    sidecar.remove_legacy(store)
     return new_record
 
 
@@ -134,6 +134,10 @@ def recover(store: Path) -> None:
         # The swap completed; the backup is no longer needed.
         _remove(backup_db)
         _remove(temp_db)
+    if sidecar.sidecar_path(store).is_file():
+        # A completed migration wrote the TOML sidecar; drop the legacy
+        # JSON one so the store never keeps two sidecars.
+        sidecar.remove_legacy(store)
 
 
 def _rollback(store: Path) -> None:

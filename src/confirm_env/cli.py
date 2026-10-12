@@ -1,6 +1,6 @@
 """Command line interface for confirm-env.
 
-Two modes are supported:
+Modes:
 
 ``confirm-env -e FILE``
     Open the editor for ``FILE``, creating the store if it does not exist.
@@ -9,7 +9,13 @@ Two modes are supported:
     Unlock ``FILE`` and run ``COMMAND`` with its variables in the
     environment. ``COMMAND``'s exit status is forwarded unchanged.
 
-All options must appear before ``FILE``; everything after ``FILE`` is the
+``confirm-env --provider NAME COMMAND [ARGS...]``
+    Resolve the store from a saved provider instead of naming ``FILE``.
+
+``confirm-env --set-provider NAME FILE``
+    Record ``FILE`` as the store for ``NAME`` and exit.
+
+All options must appear before the store; everything after it is the
 command and its arguments.
 """
 
@@ -19,15 +25,17 @@ import argparse
 import os
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 from rich.console import Console
 
-from confirm_env import __version__, migrate, sidecar
+from confirm_env import __version__, migrate, picker, providers, sidecar
 from confirm_env.database import Database, UnlockError
 from confirm_env.editor import EditorApp
 from confirm_env.sidecar import Sidecar
 from confirm_env.unlock import (
+    announce_command_splash,
     announce_splash,
     announce_target,
     confirm_delay,
@@ -78,11 +86,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="open the editor for FILE, creating it if needed",
     )
     parser.add_argument(
-        "-p",
         "--print",
         dest="print_env",
         action="store_true",
         help="print the variables as shell 'export' lines",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        metavar="NAME",
+        help="resolve the store from the saved provider NAME",
+    )
+    parser.add_argument(
+        "--set-provider",
+        nargs=2,
+        default=None,
+        metavar=("NAME", "FILE"),
+        help="record FILE as the store for provider NAME and exit",
     )
     parser.add_argument(
         "--delay",
@@ -92,8 +112,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the configured unlock delay",
     )
     parser.add_argument(
+        "--title",
+        default=None,
+        metavar="TEXT",
+        help="show a confirm box with this title before unlocking",
+    )
+    parser.add_argument(
+        "--description",
+        default=None,
+        metavar="TEXT",
+        help="body text for the confirm box (used with --title)",
+    )
+    parser.add_argument(
         "file",
         type=Path,
+        nargs="?",
+        default=None,
         help="the confirm-env database to use",
     )
     parser.add_argument(
@@ -255,8 +289,17 @@ def run_command(
     command: list[str],
     delay_override: float | None,
     console: Console,
+    *,
+    title: str | None = None,
+    description: str | None = None,
 ) -> int:
     """Unlock the store and run ``command`` with its variables set."""
+    if (title or description) and not announce_command_splash(
+        title or "",
+        description or "",
+        console=console,
+    ):
+        raise UserCancelledError
     database, _ = unlock_store(
         store,
         command=command,
@@ -276,23 +319,79 @@ def run_command(
     return completed.returncode
 
 
+def run_set_provider(name: str, store: Path, console: Console) -> int:
+    """Record a provider mapping and exit."""
+    try:
+        providers.set_provider(name, store)
+    except (ValueError, FileNotFoundError) as exc:
+        raise CliError(str(exc)) from exc
+    console.print(f"[green]Provider[/green] {name} -> {store}")
+    return 0
+
+
+def resolve_provider(name: str, console: Console) -> Path:
+    """Resolve ``name`` to a store path, opening a picker when unknown."""
+    resolved = providers.lookup(name)
+    if resolved is not None:
+        if resolved.is_file():
+            return resolved
+        raise CliError(
+            f"provider {name!r} points at missing file {resolved}; "
+            f"reset it with 'confirm-env --set-provider {name} FILE'",
+        )
+    if not sys.stdin.isatty():
+        raise CliError(
+            f"no provider named {name!r}; set one with "
+            f"'confirm-env --set-provider {name} FILE'",
+        )
+    chosen = picker.pick_file()
+    if chosen is None:
+        raise UserCancelledError
+    try:
+        providers.set_provider(name, chosen)
+    except (ValueError, FileNotFoundError) as exc:
+        raise CliError(str(exc)) from exc
+    console.print(f"[green]Saved provider[/green] {name} -> {chosen}")
+    return chosen
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     console = Console()
     try:
-        if args.edit:
-            return run_editor(args.file, args.delay, console)
+        if args.set_provider is not None:
+            name, store = args.set_provider
+            return run_set_provider(name, Path(store), console)
         command = list(args.command)
+        store = args.file
+        if args.provider is not None:
+            # Provider mode has no FILE positional, so argparse hands the
+            # first command token to ``file``; put it back on the command.
+            if store is not None:
+                command = [str(store), *command]
+                store = None
+            store = resolve_provider(args.provider, console)
+        if store is None:
+            parser.error("a FILE is required, or use --provider NAME")
+        if args.edit:
+            return run_editor(store, args.delay, console)
         if args.print_env:
             if command:
                 parser.error("--print does not accept a command")
-            return print_env(args.file, args.delay, console)
+            return print_env(store, args.delay, console)
         if not command:
             parser.error(
                 "a command is required, or use -e/--edit to edit the store",
             )
-        return run_command(args.file, command, args.delay, console)
+        return run_command(
+            store,
+            command,
+            args.delay,
+            console,
+            title=args.title,
+            description=args.description,
+        )
     except UserCancelledError:
         console.print("[yellow]Cancelled.[/yellow]")
         return EXIT_CANCELLED

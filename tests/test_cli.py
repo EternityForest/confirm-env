@@ -34,7 +34,7 @@ def locked_store(tmp_path: Path) -> Path:
     """An encrypted store that also requires a two-digit math lock."""
     path = tmp_path / "locked.db"
     record = sidecar.create(PASSPHRASE)
-    record = replace(record, settings=LockSettings(math_lock_digits=2))
+    record = replace(record, lock_settings=LockSettings(math_lock_digits=2))
     database = Database.create(path, record.derive_key(PASSPHRASE))
     database.set_env("GREETING", "hello world")
     database.close()
@@ -50,7 +50,7 @@ def _fast_unlock(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_print_env(store: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["-p", str(store)]) == 0
+    assert cli.main(["--print", str(store)]) == 0
     out = capsys.readouterr().out
     assert "export GREETING='hello world'" in out
 
@@ -66,7 +66,7 @@ def test_print_env_plaintext(
     database.close()
     sidecar.save(path, record)
 
-    assert cli.main(["-p", str(path)]) == 0
+    assert cli.main(["--print", str(path)]) == 0
     assert "export A=1" in capsys.readouterr().out
 
 
@@ -98,7 +98,7 @@ def test_missing_store(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert cli.main(["-p", str(tmp_path / "nope.db")]) == 1
+    assert cli.main(["--print", str(tmp_path / "nope.db")]) == 1
     assert "no store" in capsys.readouterr().out
 
 
@@ -108,7 +108,7 @@ def test_missing_sidecar(
 ) -> None:
     path = tmp_path / "orphan.db"
     path.write_bytes(b"not a real database")
-    assert cli.main(["-p", str(path)]) == 1
+    assert cli.main(["--print", str(path)]) == 1
     assert "missing sidecar" in capsys.readouterr().out
 
 
@@ -118,7 +118,7 @@ def test_wrong_passphrase(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "prompt_passphrase", lambda *a, **k: "wrong")
-    assert cli.main(["-p", str(store)]) == 1
+    assert cli.main(["--print", str(store)]) == 1
     assert "Wrong passphrase" in capsys.readouterr().out
 
 
@@ -128,7 +128,7 @@ def test_math_lock_correct_answer_unlocks(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "prompt_math_lock", lambda *a, **k: True)
-    assert cli.main(["-p", str(locked_store)]) == 0
+    assert cli.main(["--print", str(locked_store)]) == 0
     assert "export GREETING='hello world'" in capsys.readouterr().out
 
 
@@ -138,7 +138,7 @@ def test_math_lock_wrong_answers_exhaust_attempts(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "prompt_math_lock", lambda *a, **k: False)
-    assert cli.main(["-p", str(locked_store)]) == 1
+    assert cli.main(["--print", str(locked_store)]) == 1
     out = capsys.readouterr().out
     assert "Wrong answer" in out
     assert "too many failed unlock attempts" in out
@@ -164,13 +164,13 @@ def test_math_lock_shares_attempt_budget(
         return "wrong"
 
     monkeypatch.setattr(cli, "prompt_passphrase", counting_passphrase)
-    assert cli.main(["-p", str(locked_store)]) == 1
+    assert cli.main(["--print", str(locked_store)]) == 1
     assert passphrase_calls == 2
 
 
 def test_print_rejects_command(store: Path) -> None:
     with pytest.raises(SystemExit):
-        cli.main(["-p", str(store), "true"])
+        cli.main(["--print", str(store), "true"])
 
 
 def test_unlock_shows_splash(
@@ -188,7 +188,7 @@ def test_unlock_shows_splash(
     database.close()
     sidecar.save(path, record)
 
-    assert cli.main(["-p", str(path)]) == 0
+    assert cli.main(["--print", str(path)]) == 0
     out = capsys.readouterr().out
     assert "Personal secrets" in out
     assert "Home server" in out
@@ -205,7 +205,7 @@ def test_plaintext_store_shows_splash(
     database.close()
     sidecar.save(path, record)
 
-    assert cli.main(["-p", str(path)]) == 0
+    assert cli.main(["--print", str(path)]) == 0
     assert "Plain store" in capsys.readouterr().out
 
 
@@ -231,15 +231,15 @@ def test_unlock_recovers_interrupted_migration(
         source.export_to(tmp_path / "s.db.reencrypt", new_key)
     finally:
         source.close()
-    sidecar.write(tmp_path / "s.db.sidecar.json.reencrypt", new_record)
+    sidecar.write(tmp_path / "s.db.sidecar.toml.reencrypt", new_record)
     shutil.copy(store, tmp_path / "s.db.previous")
     (tmp_path / "s.db.reencrypt").replace(store)
 
     # Unlocking first rolls the store back to the original passphrase.
-    assert cli.main(["-p", str(store)]) == 0
+    assert cli.main(["--print", str(store)]) == 0
     assert "export GREETING=hi" in capsys.readouterr().out
     assert not (tmp_path / "s.db.previous").exists()
-    assert not (tmp_path / "s.db.sidecar.json.reencrypt").exists()
+    assert not (tmp_path / "s.db.sidecar.toml.reencrypt").exists()
 
 
 def test_requires_command(store: Path) -> None:
@@ -309,6 +309,34 @@ def test_run_editor_rejects_orphan_database(tmp_path: Path) -> None:
         cli.run_editor(path, None, _console())
 
 
+def test_edit_mode_ignores_title_and_description(
+    store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_splash(title: str, description: str, **kwargs: object) -> bool:
+        calls.append((title, description))
+        return True
+
+    monkeypatch.setattr(cli, "announce_command_splash", fake_splash)
+    monkeypatch.setattr(cli, "run_editor", lambda *a, **k: 0)
+
+    code = cli.main(
+        [
+            "-e",
+            str(store),
+            "--title",
+            "Danger",
+            "--description",
+            "Will wipe data",
+        ],
+    )
+
+    assert code == 0
+    assert calls == []
+
+
 def test_delay_parsing_rejects_negative() -> None:
     import argparse
 
@@ -317,3 +345,143 @@ def test_delay_parsing_rejects_negative() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         cli._delay_seconds("abc")
     assert cli._delay_seconds("2.5") == 2.5
+
+
+class _InteractiveStdin:
+    """A stand-in for a terminal stdin in picker tests."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _point_providers_at(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Path:
+    config = tmp_path / "providers.toml"
+    monkeypatch.setattr(cli.providers, "providers_path", lambda: config)
+    monkeypatch.delenv(cli.providers.ENV_VAR, raising=False)
+    return config
+
+
+def test_set_provider_records_mapping(
+    store: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+
+    assert cli.main(["--set-provider", "work", str(store)]) == 0
+    assert cli.providers.lookup("work") == store
+    assert "work" in capsys.readouterr().out
+
+
+def test_set_provider_rejects_missing_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+
+    code = cli.main(
+        ["--set-provider", "work", str(tmp_path / "missing.db")],
+    )
+    assert code == 1
+    assert "no such file" in capsys.readouterr().out
+
+
+def test_provider_resolves_and_runs_command(
+    store: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+    cli.providers.set_provider("work", store)
+
+    code = cli.main(
+        [
+            "--provider",
+            "work",
+            sys.executable,
+            "-c",
+            "import os; print(os.environ['GREETING'])",
+        ],
+    )
+    assert code == 0
+    assert "hello world" in capfd.readouterr().out
+
+
+def test_provider_uses_env_override(
+    store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(cli.providers.ENV_VAR, f"work:{store}")
+
+    code = cli.main(
+        ["--provider", "work", sys.executable, "-c", "print('ok')"],
+    )
+    assert code == 0
+    assert "ok" in capfd.readouterr().out
+
+
+def test_provider_missing_noninteractive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+
+    code = cli.main(["--provider", "nope", sys.executable, "-c", "pass"])
+    assert code == 1
+    assert "no provider named" in capsys.readouterr().out
+
+
+def test_provider_points_at_missing_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+    cli.providers.save({"work": str(tmp_path / "gone.db")})
+
+    code = cli.main(["--provider", "work", sys.executable, "-c", "pass"])
+    assert code == 1
+    assert "missing file" in capsys.readouterr().out
+
+
+def test_provider_picker_persists_choice(
+    store: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", _InteractiveStdin())
+    monkeypatch.setattr(cli.picker, "pick_file", lambda *a, **k: store)
+
+    code = cli.main(
+        ["--provider", "work", sys.executable, "-c", "print('picked')"],
+    )
+    assert code == 0
+    assert "picked" in capfd.readouterr().out
+    assert cli.providers.lookup("work") == store
+
+
+def test_provider_picker_cancel_is_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _point_providers_at(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli.sys, "stdin", _InteractiveStdin())
+    monkeypatch.setattr(cli.picker, "pick_file", lambda *a, **k: None)
+
+    code = cli.main(["--provider", "work", sys.executable, "-c", "pass"])
+    assert code == 130
+
+
+def test_missing_file_and_provider_is_error() -> None:
+    with pytest.raises(SystemExit):
+        cli.main([])

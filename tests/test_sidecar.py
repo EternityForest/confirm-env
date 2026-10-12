@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import tomli_w
 
 from confirm_env import sidecar
 from confirm_env.crypto import derive_key
@@ -31,7 +32,11 @@ def test_create_plaintext(empty: str | None) -> None:
 
 
 def test_sidecar_path_suffix() -> None:
-    assert sidecar.sidecar_path(Path("/tmp/a.db")).name == "a.db.sidecar.json"
+    assert sidecar.sidecar_path(Path("/tmp/a.db")).name == "a.db.sidecar.toml"
+    assert (
+        sidecar.legacy_sidecar_path(Path("/tmp/a.db")).name
+        == "a.db.sidecar.json"
+    )
 
 
 def test_save_load_roundtrip(tmp_path: Path) -> None:
@@ -50,9 +55,9 @@ def test_load_legacy_sidecar_without_cipher_compatibility(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
+    payload = sidecar.create("pw").to_dict()
     del payload["cipher_compatibility"]
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     assert sidecar.load(path).cipher_compatibility is None
 
 
@@ -62,9 +67,9 @@ def test_load_rejects_invalid_cipher_compatibility(
     value: object,
 ) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
+    payload = sidecar.create("pw").to_dict()
     payload["cipher_compatibility"] = value
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     with pytest.raises(ValueError):
         sidecar.load(path)
 
@@ -73,7 +78,7 @@ def test_settings_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
     original = replace(
         sidecar.create(None),
-        settings=LockSettings(unlock_delay=2.5),
+        lock_settings=LockSettings(unlock_delay=2.5),
     )
     sidecar.save(path, original)
     assert sidecar.load(path).lock_settings.unlock_delay == 2.5
@@ -83,7 +88,7 @@ def test_settings_math_lock_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
     original = replace(
         sidecar.create(None),
-        settings=LockSettings(unlock_delay=1.0, math_lock_digits=3),
+        lock_settings=LockSettings(unlock_delay=1.0, math_lock_digits=3),
     )
     sidecar.save(path, original)
     assert sidecar.load(path).lock_settings.math_lock_digits == 3
@@ -91,9 +96,9 @@ def test_settings_math_lock_roundtrip(tmp_path: Path) -> None:
 
 def test_load_legacy_sidecar_without_math_lock(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
+    payload = sidecar.create("pw").to_dict()
     del payload["lock_settings"]["math_lock_digits"]
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     assert sidecar.load(path).lock_settings.math_lock_digits == 0
 
 
@@ -103,9 +108,9 @@ def test_load_rejects_invalid_math_lock_digits(
     value: object,
 ) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
-    payload["settings"]["math_lock_digits"] = value
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    payload = sidecar.create("pw").to_dict()
+    payload["lock_settings"]["math_lock_digits"] = value
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     with pytest.raises(ValueError):
         sidecar.load(path)
 
@@ -135,21 +140,21 @@ def test_splash_roundtrip(
 
 def test_load_legacy_sidecar_without_splash(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
+    payload = sidecar.create("pw").to_dict()
     del payload["database_title"]
     del payload["database_description"]
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     loaded = sidecar.load(path)
     assert loaded.database_title == ""
     assert loaded.database_description == ""
 
 
-@pytest.mark.parametrize("value", [1, None, ["x"]])
+@pytest.mark.parametrize("value", [1, ["x"]])
 def test_load_rejects_invalid_splash(tmp_path: Path, value: object) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
+    payload = sidecar.create("pw").to_dict()
     payload["database_title"] = value
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     with pytest.raises(ValueError):
         sidecar.load(path)
 
@@ -169,9 +174,9 @@ def test_save_requires_directory(tmp_path: Path) -> None:
         sidecar.save(tmp_path / "missing" / "s.db", sidecar.create(None))
 
 
-def test_load_rejects_foreign_json(tmp_path: Path) -> None:
+def test_load_rejects_foreign_sidecar(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
-    sidecar.sidecar_path(path).write_text(json.dumps({"format": "other"}))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps({"format": "other"}))
     with pytest.raises(ValueError):
         sidecar.load(path)
 
@@ -179,7 +184,7 @@ def test_load_rejects_foreign_json(tmp_path: Path) -> None:
 def test_load_rejects_unknown_version(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
     sidecar.sidecar_path(path).write_text(
-        json.dumps({"format": "confirm-env", "version": 99}),
+        tomli_w.dumps({"format": "confirm-env", "version": 99}),
     )
     with pytest.raises(ValueError):
         sidecar.load(path)
@@ -187,11 +192,32 @@ def test_load_rejects_unknown_version(tmp_path: Path) -> None:
 
 def test_load_rejects_corrupt_kdf(tmp_path: Path) -> None:
     path = tmp_path / "s.db"
-    payload = sidecar.create("pw").to_json()
+    payload = sidecar.create("pw").to_dict()
     payload["kdf"]["time_cost"] = 0
-    sidecar.sidecar_path(path).write_text(json.dumps(payload))
+    sidecar.sidecar_path(path).write_text(tomli_w.dumps(payload))
     with pytest.raises(ValueError):
         sidecar.load(path)
+
+
+def test_load_reads_legacy_json_sidecar(tmp_path: Path) -> None:
+    path = tmp_path / "s.db"
+    payload = sidecar.create("pw").to_dict()
+    sidecar.legacy_sidecar_path(path).write_text(json.dumps(payload))
+    loaded = sidecar.load(path)
+    assert loaded.encrypted
+    assert loaded.salt is not None
+
+
+def test_save_removes_legacy_json_sidecar(tmp_path: Path) -> None:
+    path = tmp_path / "s.db"
+    legacy = sidecar.legacy_sidecar_path(path)
+    legacy.write_text(json.dumps(sidecar.create("pw").to_dict()))
+    assert sidecar.exists(path)
+
+    sidecar.save(path, sidecar.create("pw"))
+
+    assert not legacy.exists()
+    assert sidecar.sidecar_path(path).is_file()
 
 
 def test_save_is_atomic_leaves_no_temp_files(tmp_path: Path) -> None:

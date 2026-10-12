@@ -3,31 +3,37 @@
 A confirm-env store is a pair of files:
 
 * ``FILE``                the SQLCipher (or plain SQLite) database.
-* ``FILE.sidecar.json``   the salt and argon2id parameters needed to derive
-                          the database key from a passphrase.
+* ``FILE.sidecar.toml``   the salt and argon2id parameters needed to
+                          derive the database key from a passphrase.
 
 The salt is *not* secret; keeping it in a plain file next to the database
 lets us use a modern KDF without having to read the encrypted header, and
 keeps the format inspectable and version-controllable. Keeping it in a
 separate file also means a database can be created and moved without ever
 calling into SQLCipher's legacy key derivation.
+
+The sidecar used to be JSON (``FILE.sidecar.json``). We still *read* that
+legacy format so existing stores keep working, and delete it once the
+store is next written as TOML, so a store never has two sidecars.
 """
 
 from __future__ import annotations
 
 import base64
 import json
-import os
-import tempfile
+import tomllib
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import tomli_w
+
+from confirm_env.atomicwrite import atomic_write_text
 from confirm_env.crypto import KdfParams, derive_key, new_salt
 
-#: Marker written into the sidecar so a stray ``*.sidecar.json`` is
+#: Marker written into the sidecar so a stray ``*.sidecar.toml`` is
 #: recognisable.
 FORMAT = "confirm-env"
 
@@ -35,7 +41,10 @@ FORMAT = "confirm-env"
 VERSION = 1
 
 #: Suffix appended to the database path to build the sidecar path.
-SIDECAR_SUFFIX = ".sidecar.json"
+SIDECAR_SUFFIX = ".sidecar.toml"
+
+#: Suffix of the pre-TOML JSON sidecar, still read for old stores.
+LEGACY_SIDECAR_SUFFIX = ".sidecar.json"
 
 
 #: Default unlock delay, in seconds.
@@ -77,14 +86,14 @@ class LockSettings:
         if self.math_lock_digits < 0:
             raise ValueError("math lock digits must not be negative")
 
-    def to_json(self) -> dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "unlock_delay": self.unlock_delay,
             "math_lock_digits": self.math_lock_digits,
         }
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> LockSettings:
+    def from_dict(cls, data: dict[str, Any]) -> LockSettings:
         raw = data.get("unlock_delay", DEFAULT_UNLOCK_DELAY)
         try:
             delay = float(raw)
@@ -120,19 +129,28 @@ class Sidecar:
         assert self.kdf is not None, "encrypted sidecar must carry KDF params"
         return derive_key(passphrase, self.salt, self.kdf)
 
-    def to_json(self) -> dict[str, Any]:
-        """Serialise to a plain JSON-compatible dictionary."""
+    def to_dict(self) -> dict[str, Any]:
+        """Serialise to a TOML-compatible dictionary.
+
+        Top-level scalars are emitted before the nested ``lock_settings``
+        and ``kdf`` tables because TOML requires a table's own keys to
+        precede any of its sub-tables.
+        """
         data: dict[str, Any] = {
             "format": FORMAT,
             "version": self.version,
             "encryption": self.encryption.value,
-            "lock_settings": self.lock_settings.to_json(),
             "database_title": self.database_title,
             "database_description": self.database_description,
         }
         if self.encrypted:
             assert self.salt is not None and self.kdf is not None
             data["salt"] = base64.b64encode(self.salt).decode("ascii")
+            if self.cipher_compatibility is not None:
+                data["cipher_compatibility"] = self.cipher_compatibility
+        data["lock_settings"] = self.lock_settings.to_dict()
+        if self.encrypted:
+            assert self.kdf is not None
             data["kdf"] = {
                 "algorithm": "argon2id",
                 "time_cost": self.kdf.time_cost,
@@ -140,12 +158,10 @@ class Sidecar:
                 "parallelism": self.kdf.parallelism,
                 "hash_len": self.kdf.hash_len,
             }
-            if self.cipher_compatibility is not None:
-                data["cipher_compatibility"] = self.cipher_compatibility
         return data
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> Sidecar:
+    def from_dict(cls, data: dict[str, Any]) -> Sidecar:
         """Parse and validate a dictionary previously written by us."""
         if data.get("format") != FORMAT:
             raise ValueError("not a confirm-env sidecar file")
@@ -156,7 +172,7 @@ class Sidecar:
             encryption = EncryptionMode(data["encryption"])
         except (KeyError, ValueError) as exc:
             raise ValueError("invalid encryption mode") from exc
-        lock_settings = LockSettings.from_json(data.get("lock_settings", {}))
+        lock_settings = LockSettings.from_dict(data.get("lock_settings", {}))
         database_title = _parse_text(data, "database_title")
         database_description = _parse_text(data, "database_description")
         if encryption is EncryptionMode.NONE:
@@ -241,68 +257,59 @@ def create(passphrase: str | None) -> Sidecar:
 
 
 def sidecar_path(db_path: Path) -> Path:
-    """Return the sidecar path for ``db_path``."""
+    """Return the canonical (TOML) sidecar path for ``db_path``."""
     return db_path.with_name(db_path.name + SIDECAR_SUFFIX)
+
+
+def legacy_sidecar_path(db_path: Path) -> Path:
+    """Return the pre-TOML JSON sidecar path for ``db_path``."""
+    return db_path.with_name(db_path.name + LEGACY_SIDECAR_SUFFIX)
 
 
 def exists(db_path: Path) -> bool:
     """Whether a sidecar file exists for ``db_path``."""
-    return sidecar_path(db_path).is_file()
+    return (
+        sidecar_path(db_path).is_file()
+        or legacy_sidecar_path(db_path).is_file()
+    )
 
 
 def load(db_path: Path) -> Sidecar:
-    """Read and validate the sidecar for ``db_path``."""
+    """Read and validate the sidecar for ``db_path``.
+
+    Prefers the TOML sidecar and falls back to the pre-TOML JSON sidecar
+    so stores created by older versions keep working.
+    """
     path = sidecar_path(db_path)
-    with path.open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
+    if path.is_file():
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    else:
+        legacy = legacy_sidecar_path(db_path)
+        if not legacy.is_file():
+            raise FileNotFoundError(f"no sidecar file for {db_path}")
+        data = json.loads(legacy.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("sidecar file must contain a JSON object")
-    return Sidecar.from_json(data)
+        raise ValueError("sidecar file must contain a table")
+    return Sidecar.from_dict(data)
 
 
 def save(db_path: Path, sidecar: Sidecar) -> None:
-    """Atomically write ``sidecar`` next to ``db_path``."""
+    """Atomically write ``sidecar`` next to ``db_path``.
+
+    Any pre-TOML JSON sidecar is removed once the TOML file is safely in
+    place, so a store never keeps two sidecars.
+    """
     write(sidecar_path(db_path), sidecar)
+    remove_legacy(db_path)
 
 
 def write(path: Path, sidecar: Sidecar) -> None:
-    """Atomically write ``sidecar`` to ``path``.
-
-    Writes go to a temporary file in the same directory, are flushed and
-    fsynced, then renamed over the target. This keeps the sidecar intact if
-    the device is unplugged or loses power mid-write.
-    """
-    if not path.parent.is_dir():
-        raise FileNotFoundError(
-            f"directory does not exist: {path.parent}",
-        )
-    payload = json.dumps(sidecar.to_json(), indent=2, sort_keys=True) + "\n"
-    _atomic_write_text(path, payload)
+    """Atomically write ``sidecar`` to ``path`` as TOML."""
+    payload = tomli_w.dumps(sidecar.to_dict())
+    atomic_write_text(path, payload + "\n")
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    handle_fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        tmp_path.replace(path)
-        _fsync_directory(path.parent)
-    except BaseException:
-        with suppress(FileNotFoundError):
-            tmp_path.unlink()
-        raise
-
-
-def _fsync_directory(directory: Path) -> None:
-    fd = os.open(str(directory), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+def remove_legacy(db_path: Path) -> None:
+    """Delete a pre-TOML JSON sidecar for ``db_path`` if one is present."""
+    with suppress(FileNotFoundError):
+        legacy_sidecar_path(db_path).unlink()

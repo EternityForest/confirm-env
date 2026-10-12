@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import (
     BarColumn,
     Progress,
@@ -30,6 +31,10 @@ from rich.progress import (
 #: Keys that cancel the delay: ``q``, Escape and Ctrl-C (in cbreak mode
 #: Ctrl-C arrives as the ETX byte rather than a signal).
 CANCEL_KEYS = frozenset({"q", "\x1b", "\x03"})
+
+#: Keys that cancel the command splash: Escape and Ctrl-C. Every other key
+#: passes the gate, as the splash asks for "any key".
+SPLASH_CANCEL_KEYS = frozenset({"\x1b", "\x03"})
 
 
 class KeyListener:
@@ -72,6 +77,20 @@ class KeyListener:
         if not readable:
             return False
         return sys.stdin.read(1) in self._keys
+
+    def wait(self) -> str | None:
+        """Block for a single key press and return it.
+
+        Returns ``None`` on a non-interactive stdin, where we must not
+        consume input that belongs to the command being run.
+        """
+        if self._fd is None:
+            return None
+        # pyrefly: ignore [implicit-any-empty-container]
+        readable, _, _ = select.select([self._fd], [], [], None)
+        if not readable:
+            return None
+        return sys.stdin.read(1)
 
 
 def confirm_delay(
@@ -156,6 +175,39 @@ def announce_splash(
         console.print(f"[bold]{title}[/bold]")
     if description:
         console.print(description)
+
+
+def _read_key() -> str | None:
+    """Block for a single key press, or ``None`` without a terminal."""
+    with KeyListener() as listener:
+        return listener.wait()
+
+
+def announce_command_splash(
+    title: str,
+    description: str,
+    *,
+    console: Console | None = None,
+    wait: Callable[[], str | None] = _read_key,
+) -> bool:
+    """Show a box describing the command and wait for a key press.
+
+    The box is displayed *before* the unlock delay starts, so the user can
+    see exactly what is about to happen. Returns ``True`` when a key is
+    pressed, or ``False`` if the user cancels with Escape or Ctrl-C. A
+    non-interactive stdin passes straight through without consuming input.
+    """
+    console = console or Console()
+    body = "\n".join(part for part in (title, description) if part)
+    console.print(
+        Panel(
+            body or "(no description)",
+            title="Confirm",
+            subtitle="Press any key to continue, Esc or Ctrl-C to cancel",
+        ),
+    )
+    key = wait()
+    return key not in SPLASH_CANCEL_KEYS
 
 
 def prompt_passphrase(question: str = "Passphrase: ") -> str:

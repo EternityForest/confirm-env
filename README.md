@@ -32,17 +32,21 @@ $ confirm-env -e secrets.db
 $ confirm-env secrets.db bash -c 'echo $test'
 
 # 3. Or print them for a shell to source (direnv friendly).
-$ confirm-env -p secrets.db
+$ confirm-env --print secrets.db
 export API_KEY='...'
 export DATABASE_URL='...'
 ```
 
 The store is a pair of files that travel together:
 
-| File                  | Contents                                        |
-| --------------------- | ----------------------------------------------- |
-| `secrets.db`          | the SQLCipher database (variables + metadata)   |
-| `secrets.db.sidecar.json` | the argon2id salt and parameters            |
+| File                      | Contents                                     |
+| ------------------------- | -------------------------------------------- |
+| `secrets.db`              | the SQLCipher database (variables + metadata) |
+| `secrets.db.sidecar.toml` | the argon2id salt and parameters              |
+
+Stores created by older versions used a `.sidecar.json` file. `confirm-env`
+still reads that format, and removes it the next time the store is saved as
+TOML, so a store never keeps two sidecars.
 
 ## Why a sidecar?
 
@@ -74,6 +78,47 @@ A store can carry a title and a description, shown just before the
 passphrase prompt so you can see exactly which store you are about to
 open. Both live in the sidecar and can be set on the **Metadata &
 Settings** page of the editor; leaving them empty hides the splash.
+
+## Command splash
+
+Pass `--title` (and optionally `--description`) when running a command to
+show a confirmation box *before* the unlock delay starts:
+
+```console
+$ confirm-env --title "Deploy" --description "Pushing to production" \
+    secrets.db deploy.sh
+```
+
+The box waits for any key, so you can read exactly what you are about to
+do. Both options are ignored in edit mode.
+
+## Providers
+
+Providers let you keep generic scripts instead of hard-coding the path to a
+store. The mappings live in a single config file discovered with
+[platformdirs](https://pypi.org/project/platformdirs/)
+(`providers.toml` in your user config directory).
+
+```console
+# Record a store under a name (the file must already exist).
+$ confirm-env --set-provider work secrets.db
+
+# Resolve it by name when running a command.
+$ confirm-env --provider work bash -c 'echo $API_KEY'
+```
+
+If a name is not known, an interactive `confirm-env` shows a Textual file
+picker and remembers the choice; in a non-interactive session it fails with
+a clear error.
+
+You can bypass the lookup entirely with the `CONFIRM_ENV_PROVIDERS`
+environment variable, which takes a comma-separated list of `name:file`
+pairs:
+
+```console
+$ CONFIRM_ENV_PROVIDERS="work:/mnt/usb/secrets.db" \
+    confirm-env --provider work bash -c 'echo $API_KEY'
+```
 
 ## Editing
 

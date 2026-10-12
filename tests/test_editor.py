@@ -105,7 +105,7 @@ async def test_editor_saves_unlock_delay_to_sidecar(tmp_path: Path) -> None:
         await pilot.press("ctrl+s")
         await pilot.pause()
 
-    assert sidecar.load(path).settings.unlock_delay == 2.0
+    assert sidecar.load(path).lock_settings.unlock_delay == 2.0
     database.close()
 
 
@@ -117,7 +117,7 @@ async def test_editor_saves_math_lock_digits(tmp_path: Path) -> None:
         await pilot.press("ctrl+s")
         await pilot.pause()
 
-    assert sidecar.load(path).settings.math_lock_digits == 3
+    assert sidecar.load(path).lock_settings.math_lock_digits == 3
     database.close()
 
 
