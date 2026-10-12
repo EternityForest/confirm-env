@@ -27,7 +27,9 @@ been audited by any security professionals.
 $ confirm-env -e secrets.db
 
 # 2. Run a command with those variables in the environment.
-$ confirm-env secrets.db -- my-web-app --serve
+# Note that just plain ` confirm-env secrets.db echo $test` 
+# won't work, because  the var would get evaluated before confirm-env makes it available.
+$ confirm-env secrets.db bash -c 'echo $test'
 
 # 3. Or print them for a shell to source (direnv friendly).
 $ confirm-env -p secrets.db
