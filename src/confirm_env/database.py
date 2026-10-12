@@ -16,6 +16,7 @@ must be readable before the encrypted database is opened.
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from sqlcipher3 import dbapi2 as sqlcipher
@@ -42,6 +43,10 @@ CREATE TABLE IF NOT EXISTS metadata (
 
 _TABLES = frozenset({"env", "metadata"})
 
+#: SQLCipher format used by legacy stores written before we recorded the
+#: cipher version. Probed only when the sidecar carries no value.
+LEGACY_CIPHER_COMPATIBILITY = 3
+
 
 class UnlockError(Exception):
     """Raised when a database cannot be opened, e.g. a wrong passphrase."""
@@ -55,39 +60,82 @@ def is_valid_env_name(name: str) -> bool:
 class Database:
     """A thin, typed wrapper around a confirm-env SQLCipher connection."""
 
-    def __init__(self, connection: Connection, *, encrypted: bool) -> None:
+    def __init__(
+        self,
+        connection: Connection,
+        *,
+        encrypted: bool,
+        key: bytes | None,
+    ) -> None:
         self._connection = connection
         self.encrypted = encrypted
+        self._key = key
+
+    @property
+    def key(self) -> bytes | None:
+        """The raw database key, or ``None`` for an unencrypted store.
+
+        Retained so the store can be re-encrypted (rekeyed) without asking
+        the user for the passphrase a second time.
+        """
+        return self._key
 
     # -- lifecycle ---------------------------------------------------------
 
     @classmethod
-    def create(cls, path: Path, key: bytes | None) -> Database:
+    def create(
+        cls,
+        path: Path,
+        key: bytes | None,
+        cipher_compatibility: int | None = None,
+    ) -> Database:
         """Create a new database (and its schema) at ``path``.
 
         ``key`` is the raw 32-byte key, or ``None`` for an unencrypted
-        store. The caller is responsible for writing the sidecar.
+        store. ``cipher_compatibility`` records the SQLCipher format to
+        write; ``None`` uses SQLCipher's current defaults. The caller is
+        responsible for writing the sidecar.
         """
         if path.exists() and path.stat().st_size > 0:
             raise FileExistsError(f"database already exists: {path}")
-        connection = cls._connect(path, key)
+        connection = cls._connect(path, key, cipher_compatibility)
         try:
             connection.executescript(_SCHEMA)
             connection.commit()
         except BaseException:
             connection.close()
             raise
-        return cls(connection, encrypted=key is not None)
+        return cls(connection, encrypted=key is not None, key=key)
 
     @classmethod
-    def open(cls, path: Path, key: bytes | None) -> Database:
-        """Open an existing database, verifying the key if encrypted."""
+    def open(
+        cls,
+        path: Path,
+        key: bytes | None,
+        cipher_compatibility: int | None = None,
+    ) -> Database:
+        """Open an existing database, verifying the key if encrypted.
+
+        When ``cipher_compatibility`` is ``None`` (a store written before
+        we tracked the format) the current format is tried first and the
+        legacy SQLCipher 3 format is probed on failure.
+        """
         if not path.is_file():
             raise FileNotFoundError(f"no such database: {path}")
-        return cls(cls._connect(path, key), encrypted=key is not None)
+        try:
+            connection = cls._connect(path, key, cipher_compatibility)
+        except UnlockError:
+            if key is None or cipher_compatibility is not None:
+                raise
+            connection = cls._connect(path, key, LEGACY_CIPHER_COMPATIBILITY)
+        return cls(connection, encrypted=key is not None, key=key)
 
     @staticmethod
-    def _connect(path: Path, key: bytes | None) -> Connection:
+    def _connect(
+        path: Path,
+        key: bytes | None,
+        cipher_compatibility: int | None,
+    ) -> Connection:
         try:
             connection = sqlcipher.connect(str(path))
         except sqlcipher.Error as exc:  # pragma: no cover - driver level
@@ -97,8 +145,16 @@ class Database:
             if key is not None:
                 if len(key) != 32:
                     raise ValueError("raw database key must be 32 bytes")
-                connection.execute("PRAGMA cipher_page_size = 4096")
                 connection.execute(f"PRAGMA key = \"x'{key.hex()}'\"")
+                # ``cipher_compatibility`` must be set *after* the key; it
+                # selects the SQLCipher format (page size, HMAC/KDF
+                # algorithms) used for the connection. Four is the current
+                # default; three reads stores written by SQLCipher 3.x.
+                if cipher_compatibility is not None:
+                    connection.execute(
+                        "PRAGMA cipher_compatibility = "
+                        f"{int(cipher_compatibility)}",
+                    )
             connection.execute("PRAGMA busy_timeout = 5000")
             # Removable media and cheap flash: prefer durability to speed.
             connection.execute("PRAGMA synchronous = FULL")
@@ -117,6 +173,39 @@ class Database:
     def close(self) -> None:
         """Close the underlying connection (idempotent)."""
         self._connection.close()
+
+    def export_to(
+        self,
+        target: Path,
+        target_key: bytes | None,
+    ) -> None:
+        """Copy the whole store into ``target``, re-encrypted.
+
+        SQLCipher's ``sqlcipher_export`` copies every table and the schema
+        in one step, so this works for any future tables without keeping a
+        hardcoded column list in sync. The target is written with the
+        connection's cipher defaults (the installed SQLCipher's current
+        format), so this also migrates older stores to the current format.
+        ``target`` must not already exist.
+        """
+        if target.exists():
+            raise FileExistsError(f"target already exists: {target}")
+        if target_key is not None and len(target_key) != 32:
+            raise ValueError("raw database key must be 32 bytes")
+        key_clause = _key_clause(target_key)
+        self._connection.execute(
+            f"ATTACH DATABASE ? AS reencrypt_target KEY {key_clause}",
+            (str(target),),
+        )
+        try:
+            self._connection.execute(
+                "SELECT sqlcipher_export('reencrypt_target')",
+            )
+        except BaseException:
+            with suppress(sqlcipher.Error):
+                self._connection.execute("DETACH DATABASE reencrypt_target")
+            raise
+        self._connection.execute("DETACH DATABASE reencrypt_target")
 
     def __enter__(self) -> Database:
         return self
@@ -209,3 +298,10 @@ class Database:
 def _check_table(table: str) -> None:
     if table not in _TABLES:
         raise ValueError(f"unknown table: {table!r}")
+
+
+def _key_clause(key: bytes | None) -> str:
+    """SQL fragment setting the SQLCipher key for an attached database."""
+    if key is None:
+        return "''"
+    return f"\"x'{key.hex()}'\""

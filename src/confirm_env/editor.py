@@ -22,9 +22,10 @@ from textual.widgets import (
     TabPane,
 )
 
-from confirm_env import sidecar
+from confirm_env import migrate, sidecar
 from confirm_env.database import Database
-from confirm_env.sidecar import Settings, Sidecar
+from confirm_env.migrate import MigrationError
+from confirm_env.sidecar import LockSettings, Sidecar
 
 """The Textual GUI for editing a confirm-env store.
 
@@ -34,15 +35,20 @@ The editor has two pages inside a :class:`TabbedContent`:
   edited and deleted. Add/edit use a modal dialog; delete asks for
   confirmation.
 * **Metadata & Settings** - free-form metadata (edited with the same
-  key/value table) plus application settings such as the unlock delay.
+  key/value table), the unlock splash title and description, and
+  application settings such as the unlock delay and math lock.
 
 Nothing is written back to the database until the user saves, and quitting
 with unsaved changes asks for confirmation first.
 """
+
+
 class EditRowScreen(ModalScreen[tuple[str, str] | None]):
     """A modal dialog for adding or editing one key/value row."""
 
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel", "Cancel")
+    ]
 
     DEFAULT_CSS = """
     EditRowScreen {
@@ -111,7 +117,9 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
 class ConfirmScreen(ModalScreen[bool]):
     """A modal yes/no confirmation dialog."""
 
-    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel", "Cancel")
+    ]
 
     DEFAULT_CSS = """
     ConfirmScreen {
@@ -149,6 +157,66 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_cancel(self) -> None:
         self.dismiss(False)
+
+
+class PassphraseScreen(ModalScreen[str | None]):
+    """A modal dialog for choosing a new store passphrase.
+
+    Dismisses with the new passphrase, or ``None`` when cancelled. The
+    passphrase must be non-empty and match its confirmation.
+    """
+
+    BINDINGS: ClassVar[list[BindingType]] = [
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    DEFAULT_CSS = """
+    PassphraseScreen {
+        align: center middle;
+    }
+    """
+
+    def __init__(self, *, title: str = "Change passphrase") -> None:
+        super().__init__()
+        self._title = title
+
+    @override
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog"):
+            yield Label(self._title, classes="dialog-title")
+            yield Label("New passphrase")
+            yield Input(password=True, id="new-passphrase")
+            yield Label("Repeat passphrase")
+            yield Input(password=True, id="repeat-passphrase")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Change", variant="primary", id="save")
+                yield Button("Cancel", id="cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#new-passphrase", Input).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "save":
+            self._submit()
+        else:
+            self.dismiss(None)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _submit(self) -> None:
+        first = self.query_one("#new-passphrase", Input).value
+        second = self.query_one("#repeat-passphrase", Input).value
+        if not first:
+            self.notify("Passphrase must not be empty", severity="error")
+            return
+        if first != second:
+            self.notify("Passphrases did not match", severity="error")
+            return
+        self.dismiss(first)
 
 
 class KeyValueEditor(Widget):
@@ -305,6 +373,9 @@ class KeyValueEditor(Widget):
 class MetadataPane(Widget):
     """Metadata key/value table plus application settings."""
 
+    class ChangePassphraseRequested(Message):
+        """Posted when the user asks to change the store passphrase."""
+
     DEFAULT_CSS = """
     MetadataPane {
         height: 1fr;
@@ -316,9 +387,21 @@ class MetadataPane(Widget):
     MetadataPane #unlock-delay {
         width: 20;
     }
-    MetadataPane #setting-row {
+    MetadataPane #math-lock-digits {
+        width: 20;
+    }
+    MetadataPane #database-title {
+        width: 1fr;
+    }
+    MetadataPane #database-description {
+        width: 1fr;
+    }
+    MetadataPane .setting-row {
         height: auto;
         padding: 0 0 1 0;
+    }
+    MetadataPane #change-passphrase {
+        margin: 0 0 1 0;
     }
     """
 
@@ -336,20 +419,53 @@ class MetadataPane(Widget):
         with VerticalScroll():
             yield Static("Metadata", classes="section-title")
             yield self._editor
+            yield Static("Splash", classes="section-title")
+            with Horizontal(classes="setting-row"):
+                yield Label("Title ")
+                yield Input(id="database-title")
+            with Horizontal(classes="setting-row"):
+                yield Label("Description ")
+                yield Input(id="database-description")
             yield Static("Settings", classes="section-title")
-            with Horizontal(id="setting-row"):
+            with Horizontal(classes="setting-row"):
                 yield Label("Unlock delay (seconds) ")
                 yield Input(id="unlock-delay")
+            with Horizontal(classes="setting-row"):
+                yield Label("Math lock digits ")
+                yield Input(id="math-lock-digits")
+            yield Button("Change passphrase...", id="change-passphrase")
 
-    def load(self, metadata: dict[str, str], unlock_delay: float) -> None:
+    def load(self, metadata: dict[str, str], record: Sidecar) -> None:
         self._editor.load(metadata)
-        self.query_one("#unlock-delay", Input).value = repr(unlock_delay)
+        self.query_one("#database-title", Input).value = record.database_title
+        self.query_one(
+            "#database-description", Input
+        ).value = record.database_description
+        self.query_one("#unlock-delay", Input).value = repr(
+            record.lock_settings.unlock_delay
+        )
+        self.query_one("#math-lock-digits", Input).value = str(
+            record.lock_settings.math_lock_digits
+        )
 
     def metadata(self) -> dict[str, str]:
         return self._editor.values()
 
+    def database_title(self) -> str:
+        return self.query_one("#database-title", Input).value
+
+    def database_description(self) -> str:
+        return self.query_one("#database-description", Input).value
+
     def unlock_delay(self) -> str:
         return self.query_one("#unlock-delay", Input).value.strip()
+
+    def math_lock_digits(self) -> str:
+        return self.query_one("#math-lock-digits", Input).value.strip()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "change-passphrase":
+            self.post_message(self.ChangePassphraseRequested())
 
 
 class EditorApp(App[None]):
@@ -359,6 +475,7 @@ class EditorApp(App[None]):
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+s", "save", "Save"),
+        Binding("ctrl+p", "change_passphrase", "Passphrase"),
         Binding("ctrl+q", "request_quit", "Quit"),
     ]
 
@@ -419,10 +536,7 @@ class EditorApp(App[None]):
         variables = self.query_one("#variables", KeyValueEditor)
         variables.load(self._database.list_env())
         pane = self.query_one("#metadata", MetadataPane)
-        pane.load(
-            self._database.list_metadata(),
-            self._sidecar.settings.unlock_delay,
-        )
+        pane.load(self._database.list_metadata(), self._sidecar)
         self._dirty = False
 
     # -- change tracking ---------------------------------------------------
@@ -434,8 +548,19 @@ class EditorApp(App[None]):
         self._dirty = True
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "unlock-delay":
+        if event.input.id in {
+            "unlock-delay",
+            "math-lock-digits",
+            "database-title",
+            "database-description",
+        }:
             self._dirty = True
+
+    def on_metadata_pane_change_passphrase_requested(
+        self,
+        event: MetadataPane.ChangePassphraseRequested,
+    ) -> None:
+        self.action_change_passphrase()
 
     # -- actions -----------------------------------------------------------
 
@@ -443,23 +568,20 @@ class EditorApp(App[None]):
         variables = self.query_one("#variables", KeyValueEditor).values()
         pane = self.query_one("#metadata", MetadataPane)
         metadata = pane.metadata()
-        raw_delay = pane.unlock_delay()
         try:
-            delay = float(raw_delay)
-        except ValueError:
-            self.notify("Unlock delay must be a number", severity="error")
-            return
-        if delay < 0:
-            self.notify("Unlock delay must not be negative", severity="error")
-            return
-        try:
-            updated = replace(
-                self._sidecar,
-                settings=Settings(unlock_delay=delay),
+            settings = LockSettings(
+                unlock_delay=_parse_delay(pane.unlock_delay()),
+                math_lock_digits=_parse_digits(pane.math_lock_digits()),
             )
         except ValueError as exc:
             self.notify(str(exc), severity="error")
             return
+        updated = replace(
+            self._sidecar,
+            lock_settings=settings,
+            database_title=pane.database_title(),
+            database_description=pane.database_description(),
+        )
         try:
             self._database.replace_env(variables)
             self._database.replace_metadata(metadata)
@@ -470,6 +592,52 @@ class EditorApp(App[None]):
         self._sidecar = updated
         self._dirty = False
         self.notify("Saved")
+
+    def action_change_passphrase(self) -> None:
+        self.push_screen(PassphraseScreen(), self._on_change_passphrase)
+
+    def _on_change_passphrase(self, new_passphrase: str | None) -> None:
+        if new_passphrase is None:
+            return
+        if self._dirty:
+            self.action_save()
+            if self._dirty:
+                self.notify(
+                    "Save your changes before changing the passphrase",
+                    severity="error",
+                )
+                return
+        old_key = self._database.key
+        old_compatibility = self._sidecar.cipher_compatibility
+        # Close our connection first so the store file can be replaced
+        # (required on Windows, harmless elsewhere).
+        self._database.close()
+        try:
+            new_record = migrate.reencrypt(
+                self._store,
+                old_key=old_key,
+                old_compatibility=old_compatibility,
+                new_passphrase=new_passphrase,
+            )
+        except (MigrationError, ValueError, OSError) as exc:
+            self._database = Database.open(
+                self._store,
+                old_key,
+                old_compatibility,
+            )
+            self.notify(
+                f"Passphrase change failed: {exc}",
+                severity="error",
+            )
+            return
+        new_key = new_record.derive_key(new_passphrase)
+        self._database = Database.open(
+            self._store,
+            new_key,
+            new_record.cipher_compatibility,
+        )
+        self._sidecar = new_record
+        self.notify("Passphrase changed")
 
     def action_request_quit(self) -> None:
         if not self._dirty:
@@ -487,3 +655,25 @@ class EditorApp(App[None]):
     def _on_quit_confirmed(self, discard: bool) -> None:
         if discard:
             self.exit()
+
+
+def _parse_delay(raw: str) -> float:
+    """Parse the unlock delay field, raising a user-facing error."""
+    try:
+        delay = float(raw)
+    except ValueError as exc:
+        raise ValueError("Unlock delay must be a number") from exc
+    if delay < 0:
+        raise ValueError("Unlock delay must not be negative")
+    return delay
+
+
+def _parse_digits(raw: str) -> int:
+    """Parse the math lock digits field, raising a user-facing error."""
+    try:
+        digits = int(raw)
+    except ValueError as exc:
+        raise ValueError("Math lock digits must be a whole number") from exc
+    if digits < 0:
+        raise ValueError("Math lock digits must not be negative")
+    return digits

@@ -10,6 +10,7 @@ accidental invocation can be noticed and cancelled.
 from __future__ import annotations
 
 import getpass
+import random
 import select
 import sys
 import termios
@@ -41,7 +42,12 @@ class KeyListener:
     def __init__(self, keys: Iterable[str] = CANCEL_KEYS) -> None:
         self._keys = frozenset(keys)
         self._fd: int | None = None
-        self._saved: list[object] | None = None
+        self._saved: (
+            list[int | list[bytes | int]]
+            | list[int | list[bytes]]
+            | list[int | list[int]]
+            | None
+        ) = None
 
     def __enter__(self) -> KeyListener:
         if sys.stdin.isatty():
@@ -61,6 +67,7 @@ class KeyListener:
         """Whether a cancel key has been pressed since the last check."""
         if self._fd is None:
             return False
+        # pyrefly: ignore [implicit-any-empty-container]
         readable, _, _ = select.select([self._fd], [], [], 0)
         if not readable:
             return False
@@ -113,6 +120,7 @@ def confirm_delay(
     except KeyboardInterrupt:
         console.print("[yellow]Cancelled.[/yellow]")
         return False
+    return False
 
 
 def announce_target(
@@ -129,9 +137,59 @@ def announce_target(
     console.print(f"Store:   [bold]{store}[/bold]")
 
 
+def announce_splash(
+    title: str,
+    description: str,
+    *,
+    console: Console | None = None,
+) -> None:
+    """Print the store's title and description before the passphrase prompt.
+
+    The splash is shown after the unlock delay so that it stays on screen
+    while the passphrase is being typed, reminding the user which store
+    they are about to open. It is a no-op when both fields are empty.
+    """
+    if not title and not description:
+        return
+    console = console or Console()
+    if title:
+        console.print(f"[bold]{title}[/bold]")
+    if description:
+        console.print(description)
+
+
 def prompt_passphrase(question: str = "Passphrase: ") -> str:
     """Read a passphrase without echoing it."""
     return getpass.getpass(question)
+
+
+def _math_addends(digits: int) -> tuple[int, int]:
+    """Two random integers that each have exactly ``digits`` digits."""
+    if digits < 1:
+        raise ValueError("math lock requires at least one digit")
+    low = 10 ** (digits - 1)
+    high = 10**digits - 1
+    return random.randint(low, high), random.randint(low, high)
+
+
+def prompt_math_lock(
+    digits: int,
+    *,
+    read: Callable[[str], str] = input,
+) -> bool:
+    """Present an addition challenge and report whether it was answered.
+
+    ``digits`` is the width of each addend. The challenge is deliberately
+    simple arithmetic: its job is to catch an absent-minded invocation,
+    not to be a security boundary.
+    """
+    left, right = _math_addends(digits)
+    answer = read(f"{left} + {right} = ").strip()
+    try:
+        value = int(answer)
+    except ValueError:
+        return False
+    return value == left + right
 
 
 def confirm(question: str, *, default: bool = False) -> bool:

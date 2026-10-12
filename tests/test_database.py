@@ -87,6 +87,51 @@ def test_encrypted_roundtrip_and_wrong_key(tmp_path: Path) -> None:
         reopened.close()
 
 
+def test_open_uses_recorded_cipher_compatibility(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    database = Database.create(path, KEY, cipher_compatibility=3)
+    database.set_env("SECRET", "value")
+    database.close()
+
+    # An explicitly recorded compatibility opens directly.
+    reopened = Database.open(path, KEY, 3)
+    try:
+        assert reopened.get_env("SECRET") == "value"
+    finally:
+        reopened.close()
+
+
+def test_open_probes_legacy_format_when_unrecorded(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    database = Database.create(path, KEY, cipher_compatibility=3)
+    database.set_env("SECRET", "value")
+    database.close()
+
+    # No recorded compatibility: the native format fails and the legacy
+    # SQLCipher 3 format is probed.
+    reopened = Database.open(path, KEY)
+    try:
+        assert reopened.get_env("SECRET") == "value"
+    finally:
+        reopened.close()
+
+
+def test_explicit_compatibility_mismatch_raises(tmp_path: Path) -> None:
+    path = tmp_path / "v4.db"
+    Database.create(path, KEY, cipher_compatibility=4).close()
+    with pytest.raises(UnlockError):
+        Database.open(path, KEY, 3)
+
+
+def test_wrong_key_fails_through_compatibility_fallback(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.db"
+    Database.create(path, KEY, cipher_compatibility=3).close()
+    with pytest.raises(UnlockError):
+        Database.open(path, OTHER_KEY)
+
+
 def test_plaintext_is_readable_as_sqlite(tmp_path: Path) -> None:
     path = tmp_path / "p.db"
     database = Database.create(path, None)

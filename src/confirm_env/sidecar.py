@@ -41,6 +41,11 @@ SIDECAR_SUFFIX = ".sidecar.json"
 #: Default unlock delay, in seconds.
 DEFAULT_UNLOCK_DELAY = 5.0
 
+#: The SQLCipher ``cipher_compatibility`` pragma value used for new stores.
+#: Four is SQLCipher's current format; recording it lets us keep reading
+#: stores written by older SQLCipher 3.x builds via the pragma.
+CIPHER_COMPATIBILITY = 4
+
 
 class EncryptionMode(StrEnum):
     """How (or whether) the database is encrypted."""
@@ -49,41 +54,57 @@ class EncryptionMode(StrEnum):
     NONE = "none"
 
 
-@dataclass(frozen=True)
-class Settings:
+@dataclass()
+class LockSettings:
     """User-configurable settings.
 
     Settings live in the sidecar rather than the database because some of
-    them (the unlock delay) must be known *before* the encrypted database
-    can be opened.
+    them (the unlock delay, the math lock) must be known *before* the
+    encrypted database can be opened.
     """
 
     unlock_delay: float = DEFAULT_UNLOCK_DELAY
+    math_lock_digits: int = 0
 
     def __post_init__(self) -> None:
         if self.unlock_delay < 0:
             raise ValueError("unlock delay must not be negative")
+        if isinstance(self.math_lock_digits, bool) or not isinstance(
+            self.math_lock_digits,
+            int,
+        ):
+            raise ValueError("math lock digits must be an integer")
+        if self.math_lock_digits < 0:
+            raise ValueError("math lock digits must not be negative")
 
     def to_json(self) -> dict[str, Any]:
-        return {"unlock_delay": self.unlock_delay}
+        return {
+            "unlock_delay": self.unlock_delay,
+            "math_lock_digits": self.math_lock_digits,
+        }
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> Settings:
+    def from_json(cls, data: dict[str, Any]) -> LockSettings:
         raw = data.get("unlock_delay", DEFAULT_UNLOCK_DELAY)
         try:
-            return cls(float(raw))
+            delay = float(raw)
         except (TypeError, ValueError) as exc:
             raise ValueError("invalid unlock_delay setting") from exc
+        digits = _parse_math_lock_digits(data.get("math_lock_digits", 0))
+        return cls(unlock_delay=delay, math_lock_digits=digits)
 
 
-@dataclass(frozen=True)
+@dataclass()
 class Sidecar:
     """Parsed contents of a sidecar file."""
 
     encryption: EncryptionMode
     salt: bytes | None
     kdf: KdfParams | None
-    settings: Settings = field(default_factory=Settings)
+    cipher_compatibility: int | None = None
+    lock_settings: LockSettings = field(default_factory=LockSettings)
+    database_title: str = ""
+    database_description: str = ""
     version: int = VERSION
 
     @property
@@ -105,7 +126,9 @@ class Sidecar:
             "format": FORMAT,
             "version": self.version,
             "encryption": self.encryption.value,
-            "settings": self.settings.to_json(),
+            "lock_settings": self.lock_settings.to_json(),
+            "database_title": self.database_title,
+            "database_description": self.database_description,
         }
         if self.encrypted:
             assert self.salt is not None and self.kdf is not None
@@ -117,6 +140,8 @@ class Sidecar:
                 "parallelism": self.kdf.parallelism,
                 "hash_len": self.kdf.hash_len,
             }
+            if self.cipher_compatibility is not None:
+                data["cipher_compatibility"] = self.cipher_compatibility
         return data
 
     @classmethod
@@ -131,13 +156,17 @@ class Sidecar:
             encryption = EncryptionMode(data["encryption"])
         except (KeyError, ValueError) as exc:
             raise ValueError("invalid encryption mode") from exc
-        settings = Settings.from_json(data.get("settings", {}))
+        lock_settings = LockSettings.from_json(data.get("lock_settings", {}))
+        database_title = _parse_text(data, "database_title")
+        database_description = _parse_text(data, "database_description")
         if encryption is EncryptionMode.NONE:
             return cls(
                 encryption=EncryptionMode.NONE,
                 salt=None,
                 kdf=None,
-                settings=settings,
+                lock_settings=lock_settings,
+                database_title=database_title,
+                database_description=database_description,
                 version=version,
             )
         try:
@@ -151,13 +180,49 @@ class Sidecar:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid KDF parameters") from exc
+        cipher_compatibility = _parse_cipher_compatibility(data)
         return cls(
             encryption=EncryptionMode.SQLCIPHER,
             salt=salt,
             kdf=kdf,
-            settings=settings,
+            cipher_compatibility=cipher_compatibility,
+            lock_settings=lock_settings,
+            database_title=database_title,
+            database_description=database_description,
             version=version,
         )
+
+
+def _parse_cipher_compatibility(data: dict[str, Any]) -> int | None:
+    """Read the optional ``cipher_compatibility`` field.
+
+    A missing field means the store predates cipher-format tracking; the
+    caller falls back to probing older SQLCipher formats.
+    """
+    raw = data.get("cipher_compatibility")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise ValueError("invalid cipher_compatibility")
+    return raw
+
+
+def _parse_math_lock_digits(raw: Any) -> int:
+    """Read the optional ``math_lock_digits`` setting.
+
+    A missing value means no math lock; zero disables it too.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ValueError("invalid math_lock_digits setting")
+    return raw
+
+
+def _parse_text(data: dict[str, Any], key: str) -> str:
+    """Read an optional free-text field, defaulting to an empty string."""
+    raw = data.get(key, "")
+    if not isinstance(raw, str):
+        raise ValueError(f"invalid {key}")
+    return raw
 
 
 def create(passphrase: str | None) -> Sidecar:
@@ -166,7 +231,12 @@ def create(passphrase: str | None) -> Sidecar:
     An empty or missing passphrase produces an unencrypted database.
     """
     if passphrase:
-        return Sidecar(EncryptionMode.SQLCIPHER, new_salt(), KdfParams())
+        return Sidecar(
+            EncryptionMode.SQLCIPHER,
+            new_salt(),
+            KdfParams(),
+            cipher_compatibility=CIPHER_COMPATIBILITY,
+        )
     return Sidecar(EncryptionMode.NONE, None, None)
 
 
@@ -191,17 +261,21 @@ def load(db_path: Path) -> Sidecar:
 
 
 def save(db_path: Path, sidecar: Sidecar) -> None:
-    """Atomically write ``sidecar`` next to ``db_path``.
+    """Atomically write ``sidecar`` next to ``db_path``."""
+    write(sidecar_path(db_path), sidecar)
+
+
+def write(path: Path, sidecar: Sidecar) -> None:
+    """Atomically write ``sidecar`` to ``path``.
 
     Writes go to a temporary file in the same directory, are flushed and
     fsynced, then renamed over the target. This keeps the sidecar intact if
     the device is unplugged or loses power mid-write.
     """
-    if not db_path.parent.is_dir():
+    if not path.parent.is_dir():
         raise FileNotFoundError(
-            f"directory does not exist: {db_path.parent}",
+            f"directory does not exist: {path.parent}",
         )
-    path = sidecar_path(db_path)
     payload = json.dumps(sidecar.to_json(), indent=2, sort_keys=True) + "\n"
     _atomic_write_text(path, payload)
 

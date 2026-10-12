@@ -99,3 +99,59 @@ def test_confirm_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_confirm_yes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("builtins.input", lambda *args: "yes")
     assert unlock.confirm("ok?") is True
+
+
+def test_math_addends_have_requested_width() -> None:
+    for _ in range(50):
+        left, right = unlock._math_addends(3)
+        assert 100 <= left <= 999
+        assert 100 <= right <= 999
+
+
+def test_math_addends_reject_zero_digits() -> None:
+    with pytest.raises(ValueError):
+        unlock._math_addends(0)
+
+
+def test_prompt_math_lock_correct() -> None:
+    def read(question: str) -> str:
+        left, right = (int(part) for part in question.rstrip(" =").split(" + "))
+        return str(left + right)
+
+    assert unlock.prompt_math_lock(2, read=read) is True
+
+
+def test_prompt_math_lock_wrong() -> None:
+    assert unlock.prompt_math_lock(2, read=lambda question: "0") is False
+
+
+def test_prompt_math_lock_non_numeric() -> None:
+    assert unlock.prompt_math_lock(2, read=lambda question: "abc") is False
+
+
+def test_announce_splash_prints_title_and_description() -> None:
+    stream = io.StringIO()
+    unlock.announce_splash(
+        "Personal secrets",
+        "Home server",
+        console=Console(file=stream, width=80),
+    )
+    output = stream.getvalue()
+    assert "Personal secrets" in output
+    assert "Home server" in output
+
+
+def test_announce_splash_empty_is_silent() -> None:
+    stream = io.StringIO()
+    unlock.announce_splash("", "", console=Console(file=stream, width=80))
+    assert stream.getvalue() == ""
+
+
+def test_announce_splash_title_only() -> None:
+    stream = io.StringIO()
+    unlock.announce_splash(
+        "Only title",
+        "",
+        console=Console(file=stream, width=80),
+    )
+    assert "Only title" in stream.getvalue()

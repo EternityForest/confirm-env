@@ -23,13 +23,15 @@ from pathlib import Path
 
 from rich.console import Console
 
-from confirm_env import __version__, sidecar
+from confirm_env import __version__, migrate, sidecar
 from confirm_env.database import Database, UnlockError
 from confirm_env.editor import EditorApp
 from confirm_env.sidecar import Sidecar
 from confirm_env.unlock import (
+    announce_splash,
     announce_target,
     confirm_delay,
+    prompt_math_lock,
     prompt_new_passphrase,
     prompt_passphrase,
 )
@@ -126,7 +128,7 @@ def create_store(store: Path, console: Console) -> tuple[Database, Sidecar]:
     passphrase = prompt_new_passphrase(console=console)
     record = sidecar.create(passphrase)
     key = record.derive_key(passphrase) if passphrase else None
-    database = Database.create(store, key)
+    database = Database.create(store, key, record.cipher_compatibility)
     try:
         sidecar.save(store, record)
     except BaseException:
@@ -145,6 +147,7 @@ def unlock_store(
 ) -> tuple[Database, Sidecar]:
     """Announce, delay, prompt and open an existing store."""
     console = console or Console()
+    migrate.recover(store)
     if not sidecar.exists(store):
         if store.exists():
             raise CliError(
@@ -157,9 +160,14 @@ def unlock_store(
     record = sidecar.load(store)
     announce_target(store, command=command, console=console)
     if not record.encrypted:
+        announce_splash(
+            record.database_title,
+            record.database_description,
+            console=console,
+        )
         return Database.open(store, None), record
     delay = (
-        record.settings.unlock_delay
+        record.lock_settings.unlock_delay
         if delay_override is None
         else delay_override
     )
@@ -169,13 +177,29 @@ def unlock_store(
         console=console,
     ):
         raise UserCancelledError
-    for attempt in range(MAX_ATTEMPTS):
-        prompt = "Passphrase: " if attempt == 0 else "Passphrase (try again): "
+    announce_splash(
+        record.database_title,
+        record.database_description,
+        console=console,
+    )
+    digits = record.lock_settings.math_lock_digits
+    failures = 0
+    while failures < MAX_ATTEMPTS:
+        if digits and not prompt_math_lock(digits):
+            failures += 1
+            console.print("[red]Wrong answer.[/red]")
+            continue
+        prompt = "Passphrase: " if failures == 0 else "Passphrase (try again): "
         passphrase = prompt_passphrase(prompt)
         try:
             key = record.derive_key(passphrase)
-            return Database.open(store, key), record
+            return Database.open(
+                store,
+                key,
+                record.cipher_compatibility,
+            ), record
         except UnlockError:
+            failures += 1
             console.print("[red]Wrong passphrase.[/red]")
     raise CliError("too many failed unlock attempts")
 

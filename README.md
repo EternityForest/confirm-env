@@ -60,6 +60,21 @@ for a configurable delay (default **5 seconds**). Press `q`, `Esc` or
 `Ctrl-C` to cancel. The delay lives in the sidecar and can be changed on the
 **Metadata & Settings** page of the editor.
 
+## Math lock
+
+A store can require a small addition challenge before it will unlock, to
+catch an absent-minded invocation. Set the number of digits (the width of
+each addend) on the **Metadata & Settings** page; `0` disables the lock. The
+challenge shares the passphrase's three-attempt budget, so a wrong answer
+counts against the same limit.
+
+## Database splash
+
+A store can carry a title and a description, shown just before the
+passphrase prompt so you can see exactly which store you are about to
+open. Both live in the sidecar and can be set on the **Metadata &
+Settings** page of the editor; leaving them empty hides the splash.
+
 ## Editing
 
 `confirm-env -e FILE` opens a [Textual](https://textual.textualize.io) GUI
@@ -67,7 +82,8 @@ with two pages:
 
 * **Variables** — add, edit and delete environment variables. Deleting asks
   for confirmation.
-* **Metadata & Settings** — free-form metadata plus the unlock delay.
+* **Metadata & Settings** — free-form metadata, the unlock splash title and
+  description, plus the unlock delay and math lock.
 
 Changes are written with `Ctrl-S`; quitting with unsaved changes asks for
 confirmation.
