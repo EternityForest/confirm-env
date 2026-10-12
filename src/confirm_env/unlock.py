@@ -123,9 +123,10 @@ def announce_target(
 ) -> None:
     """Print what is about to be unlocked and why."""
     console = console or Console()
-    console.print(f"Store:   [bold]{store}[/bold]")
     if command:
         console.print(f"Command: [bold]{' '.join(command)}[/bold]")
+
+    console.print(f"Store:   [bold]{store}[/bold]")
 
 
 def prompt_passphrase(question: str = "Passphrase: ") -> str:
