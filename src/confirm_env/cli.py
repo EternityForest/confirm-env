@@ -43,7 +43,6 @@ from confirm_env.editor import EditorApp
 from confirm_env.sidecar import Sidecar
 from confirm_env.unlock import (
     announce_command_splash,
-    announce_splash,
     announce_target,
     confirm_delay,
     prompt_math_lock,
@@ -199,13 +198,9 @@ def unlock_store(
             f"no store at {store}; create one with 'confirm-env -e {store}'",
         )
     record = sidecar.load(store)
+    console.print("\n")
     announce_target(store, command=command, console=console)
     if not record.encrypted:
-        announce_splash(
-            record.database_title,
-            record.database_description,
-            console=console,
-        )
         return Database.open(store, None), record
     delay = (
         record.lock_settings.unlock_delay
@@ -218,11 +213,7 @@ def unlock_store(
         console=console,
     ):
         raise UserCancelledError
-    announce_splash(
-        record.database_title,
-        record.database_description,
-        console=console,
-    )
+
     digits = record.lock_settings.math_lock_digits
     failures = 0
     while failures < MAX_ATTEMPTS:

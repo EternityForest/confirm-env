@@ -28,6 +28,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from confirm_env import sidecar
+
 #: Keys that cancel the delay: ``q``, Escape and Ctrl-C (in cbreak mode
 #: Ctrl-C arrives as the ETX byte rather than a signal).
 CANCEL_KEYS = frozenset({"q", "\x1b", "\x03"})
@@ -150,31 +152,26 @@ def announce_target(
 ) -> None:
     """Print what is about to be unlocked and why."""
     console = console or Console()
+
+    lines : list[tuple[str,str]] = []
+
+    lines.append(("Store File", str(store)))
     if command:
-        console.print(f"Command: [bold]{' '.join(command)}[/bold]")
+        lines.append(("Command", " ".join(command)))
 
-    console.print(f"Store:   [bold]{store}[/bold]")
+    record = sidecar.load(store)
 
 
-def announce_splash(
-    title: str,
-    description: str,
-    *,
-    console: Console | None = None,
-) -> None:
-    """Print the store's title and description before the passphrase prompt.
+    p = Panel(
+            "\n".join([
+                f"{line[0]}: [bold]{line[1]}[/bold]"
+                for line in lines
+            ])+"\n\n"+(record.database_description or "No description"),
+            title=record.database_title or store.name,
 
-    The splash is shown after the unlock delay so that it stays on screen
-    while the passphrase is being typed, reminding the user which store
-    they are about to open. It is a no-op when both fields are empty.
-    """
-    if not title and not description:
-        return
-    console = console or Console()
-    if title:
-        console.print(f"[bold]{title}[/bold]")
-    if description:
-        console.print(description)
+            subtitle="Any key to continue",
+        )
+    console.print(p,)
 
 
 def _read_key() -> str | None:
@@ -198,12 +195,11 @@ def announce_command_splash(
     non-interactive stdin passes straight through without consuming input.
     """
     console = console or Console()
-    body = "\n".join(part for part in (title, description) if part)
     console.print(
         Panel(
-            body or "(no description)",
-            title="Confirm",
-            subtitle="Press any key to continue, Esc or Ctrl-C to cancel",
+            description or "(no description)",
+            title=title or "Command",
+            subtitle="Any key to continue",
         ),
     )
     key = wait()

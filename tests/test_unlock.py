@@ -127,31 +127,3 @@ def test_prompt_math_lock_wrong() -> None:
 
 def test_prompt_math_lock_non_numeric() -> None:
     assert unlock.prompt_math_lock(2, read=lambda question: "abc") is False
-
-
-def test_announce_splash_prints_title_and_description() -> None:
-    stream = io.StringIO()
-    unlock.announce_splash(
-        "Personal secrets",
-        "Home server",
-        console=Console(file=stream, width=80),
-    )
-    output = stream.getvalue()
-    assert "Personal secrets" in output
-    assert "Home server" in output
-
-
-def test_announce_splash_empty_is_silent() -> None:
-    stream = io.StringIO()
-    unlock.announce_splash("", "", console=Console(file=stream, width=80))
-    assert stream.getvalue() == ""
-
-
-def test_announce_splash_title_only() -> None:
-    stream = io.StringIO()
-    unlock.announce_splash(
-        "Only title",
-        "",
-        console=Console(file=stream, width=80),
-    )
-    assert "Only title" in stream.getvalue()
