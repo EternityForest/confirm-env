@@ -1,25 +1,11 @@
-"""The Textual GUI for editing a confirm-env store.
-
-The editor has two pages inside a :class:`TabbedContent`:
-
-* **Variables** - a table of environment variables that can be added,
-  edited and deleted. Add/edit use a modal dialog; delete asks for
-  confirmation.
-* **Metadata & Settings** - free-form metadata (edited with the same
-  key/value table) plus application settings such as the unlock delay.
-
-Nothing is written back to the database until the user saves, and quitting
-with unsaved changes asks for confirmation first.
-"""
-
 from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, override
 
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -40,11 +26,23 @@ from confirm_env import sidecar
 from confirm_env.database import Database
 from confirm_env.sidecar import Settings, Sidecar
 
+"""The Textual GUI for editing a confirm-env store.
 
+The editor has two pages inside a :class:`TabbedContent`:
+
+* **Variables** - a table of environment variables that can be added,
+  edited and deleted. Add/edit use a modal dialog; delete asks for
+  confirmation.
+* **Metadata & Settings** - free-form metadata (edited with the same
+  key/value table) plus application settings such as the unlock delay.
+
+Nothing is written back to the database until the user saves, and quitting
+with unsaved changes asks for confirmation first.
+"""
 class EditRowScreen(ModalScreen[tuple[str, str] | None]):
     """A modal dialog for adding or editing one key/value row."""
 
-    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
     EditRowScreen {
@@ -66,6 +64,7 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
         self._initial_value = value
         self._name_editable = name_editable
 
+    @override
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label(self._title, classes="dialog-title")
@@ -112,7 +111,7 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
 class ConfirmScreen(ModalScreen[bool]):
     """A modal yes/no confirmation dialog."""
 
-    BINDINGS: ClassVar[list[Binding]] = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "cancel", "Cancel")]
 
     DEFAULT_CSS = """
     ConfirmScreen {
@@ -132,6 +131,7 @@ class ConfirmScreen(ModalScreen[bool]):
         self._title = title
         self._confirm_label = confirm_label
 
+    @override
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label(self._title, classes="dialog-title")
@@ -157,7 +157,7 @@ class KeyValueEditor(Widget):
     class Changed(Message):
         """Posted whenever the set of rows changes."""
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("a", "add", "Add"),
         Binding("e", "edit", "Edit"),
         Binding("d", "delete", "Delete"),
@@ -189,6 +189,7 @@ class KeyValueEditor(Widget):
         self._value_label = value_label
         self._add_label = add_label
 
+    @override
     def compose(self) -> ComposeResult:
         yield DataTable(id="rows", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="row-actions"):
@@ -260,7 +261,7 @@ class KeyValueEditor(Widget):
                 f"Delete '{name}'?",
                 title="Delete",
             ),
-            lambda confirmed: self._on_delete(name, confirmed),
+            lambda confirmed: self._on_delete(name, confirmed or False),
         )
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -330,6 +331,7 @@ class MetadataPane(Widget):
             widget_id="metadata-editor",
         )
 
+    @override
     def compose(self) -> ComposeResult:
         with VerticalScroll():
             yield Static("Metadata", classes="section-title")
@@ -355,7 +357,7 @@ class EditorApp(App[None]):
 
     TITLE = "confirm-env"
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+s", "save", "Save"),
         Binding("ctrl+q", "request_quit", "Quit"),
     ]
@@ -402,6 +404,7 @@ class EditorApp(App[None]):
         """Whether the editor has unsaved changes."""
         return self._dirty
 
+    @override
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with TabbedContent():
