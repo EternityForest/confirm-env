@@ -8,13 +8,23 @@ from pathlib import Path
 import pytest
 from textual.widgets import Button, DataTable, Input
 
-from confirm_env import sidecar
+from confirm_env import log, sidecar
 from confirm_env.database import Database, UnlockError
-from confirm_env.editor import EditorApp, KeyValueEditor
+from confirm_env.editor import EditorApp, KeyValueEditor, LogPane
 from confirm_env.sidecar import Sidecar
 
 OLD_PASSPHRASE = "old passphrase"
 NEW_PASSPHRASE = "new passphrase"
+
+
+def _log_entry(command: str) -> log.LogEntry:
+    return log.LogEntry(
+        timestamp="2026-01-01T00:00:00+00:00",
+        command=command,
+        username="tester",
+        workdir="/work",
+        hostname="host",
+    )
 
 
 def _make_store(tmp_path: Path) -> tuple[Path, Database, Sidecar]:
@@ -282,3 +292,59 @@ async def test_editor_saves_before_changing_passphrase(tmp_path: Path) -> None:
         assert reopened.get_env("UNSAVED") == "value"
     finally:
         reopened.close()
+
+
+async def test_editor_log_page_shows_entries(tmp_path: Path) -> None:
+    path, database, record = _make_store(tmp_path)
+    for index in range(3):
+        database.append_log(_log_entry(f"cmd-{index}"))
+    app = EditorApp(database, path, record)
+    async with app.run_test():
+        pane = app.query_one("#log", LogPane)
+        table = pane.query_one(DataTable)
+        assert table.row_count == 3
+        assert pane.page_count == 1
+    database.close()
+
+
+async def test_editor_log_page_paginates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(log, "PAGE_SIZE", 2)
+    path, database, record = _make_store(tmp_path)
+    for index in range(5):
+        database.append_log(_log_entry(f"cmd-{index}"))
+    app = EditorApp(database, path, record)
+    async with app.run_test() as pilot:
+        pane = app.query_one("#log", LogPane)
+        table = pane.query_one(DataTable)
+        assert pane.page_count == 3
+
+        def commands() -> list[str]:
+            return [
+                str(table.get_row_at(row)[1]) for row in range(table.row_count)
+            ]
+
+        assert commands() == ["cmd-4", "cmd-3"]
+        assert pane.query_one("#log-previous", Button).disabled
+
+        pane.query_one("#log-next", Button).press()
+        await pilot.pause()
+        assert commands() == ["cmd-2", "cmd-1"]
+
+        pane.query_one("#log-next", Button).press()
+        await pilot.pause()
+        assert commands() == ["cmd-0"]
+        assert pane.query_one("#log-next", Button).disabled
+    database.close()
+
+
+async def test_editor_log_empty_has_one_page(tmp_path: Path) -> None:
+    path, database, record = _make_store(tmp_path)
+    app = EditorApp(database, path, record)
+    async with app.run_test():
+        pane = app.query_one("#log", LogPane)
+        assert pane.page_count == 1
+        assert pane.query_one(DataTable).row_count == 0
+    database.close()

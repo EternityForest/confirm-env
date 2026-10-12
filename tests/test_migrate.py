@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from confirm_env import migrate, sidecar
+from confirm_env import log, migrate, sidecar
 from confirm_env.database import Database, UnlockError
 from confirm_env.sidecar import CIPHER_COMPATIBILITY, Sidecar
 
@@ -94,6 +94,38 @@ def test_reencrypt_changes_passphrase_on_current_store(tmp_path: Path) -> None:
         reopened.close()
     with pytest.raises(UnlockError):
         Database.open(store, old_key, CIPHER_COMPATIBILITY)
+
+
+def test_reencrypt_preserves_log(tmp_path: Path) -> None:
+    store, old_key, old_record = _make_current_store(tmp_path)
+    database = Database.open(store, old_key, old_record.cipher_compatibility)
+    try:
+        database.append_log(
+            log.LogEntry(
+                timestamp="2026-01-01T00:00:00+00:00",
+                command="echo hi",
+                username="tester",
+                workdir="/tmp",
+                hostname="host",
+            ),
+        )
+    finally:
+        database.close()
+
+    new_record = migrate.reencrypt(
+        store,
+        old_key=old_key,
+        old_compatibility=old_record.cipher_compatibility,
+        new_passphrase=NEW_PASSPHRASE,
+    )
+
+    new_key = new_record.derive_key(NEW_PASSPHRASE)
+    reopened = Database.open(store, new_key, CIPHER_COMPATIBILITY)
+    try:
+        entries = reopened.log_page(0, 10)
+    finally:
+        reopened.close()
+    assert [entry.command for entry in entries] == ["echo hi"]
 
 
 def test_reencrypt_adds_passphrase_to_plain_store(tmp_path: Path) -> None:

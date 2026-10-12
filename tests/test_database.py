@@ -7,10 +7,21 @@ from pathlib import Path
 
 import pytest
 
+from confirm_env import log
 from confirm_env.database import Database, UnlockError, is_valid_env_name
 
 KEY = b"\x00" * 32
 OTHER_KEY = b"\x01" * 32
+
+
+def _entry(command: str) -> log.LogEntry:
+    return log.LogEntry(
+        timestamp="2026-01-01T00:00:00+00:00",
+        command=command,
+        username="tester",
+        workdir="/tmp",
+        hostname="host",
+    )
 
 
 def test_env_crud(tmp_path: Path) -> None:
@@ -166,3 +177,103 @@ def test_create_existing_raises(tmp_path: Path) -> None:
 def test_create_rejects_bad_key_length(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         Database.create(tmp_path / "a.db", b"short")
+
+
+def test_append_and_list_log(tmp_path: Path) -> None:
+    database = Database.create(tmp_path / "a.db", None)
+    try:
+        database.append_log(_entry("one"))
+        database.append_log(_entry("two"))
+        assert database.count_log() == 2
+        page = database.log_page(0, 10)
+        assert [entry.command for entry in page] == ["two", "one"]
+        assert page[0].username == "tester"
+        assert page[0].hostname == "host"
+        assert page[0].workdir == "/tmp"
+    finally:
+        database.close()
+
+
+def test_log_page_paginates(tmp_path: Path) -> None:
+    database = Database.create(tmp_path / "a.db", None)
+    try:
+        for index in range(5):
+            database.append_log(_entry(f"cmd-{index}"))
+        first = database.log_page(0, 2)
+        second = database.log_page(2, 2)
+        assert [entry.command for entry in first] == ["cmd-4", "cmd-3"]
+        assert [entry.command for entry in second] == ["cmd-2", "cmd-1"]
+    finally:
+        database.close()
+
+
+@pytest.mark.parametrize(("offset", "limit"), [(-1, 10), (0, 0)])
+def test_log_page_rejects_bad_arguments(
+    tmp_path: Path,
+    offset: int,
+    limit: int,
+) -> None:
+    database = Database.create(tmp_path / "a.db", None)
+    try:
+        with pytest.raises(ValueError):
+            database.log_page(offset, limit)
+    finally:
+        database.close()
+
+
+def test_append_log_trims_oldest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(log, "MAX_ENTRIES", 5)
+    monkeypatch.setattr(log, "TRIM_ENTRIES", 2)
+    database = Database.create(tmp_path / "a.db", None)
+    try:
+        for index in range(5):
+            database.append_log(_entry(f"cmd-{index}"))
+        assert database.count_log() == 5
+        database.append_log(_entry("cmd-5"))
+        assert database.count_log() == 4
+        remaining = database.log_page(0, 10)
+        assert [entry.command for entry in remaining] == [
+            "cmd-5",
+            "cmd-4",
+            "cmd-3",
+            "cmd-2",
+        ]
+    finally:
+        database.close()
+
+
+def test_log_survives_encrypted_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "e.db"
+    database = Database.create(path, KEY)
+    database.append_log(_entry("secret-cmd"))
+    database.close()
+
+    reopened = Database.open(path, KEY)
+    try:
+        assert [entry.command for entry in reopened.log_page(0, 10)] == [
+            "secret-cmd",
+        ]
+    finally:
+        reopened.close()
+
+
+def test_open_adds_missing_log_table(tmp_path: Path) -> None:
+    # A store written before logging existed has no ``log`` table.
+    path = tmp_path / "old.db"
+    Database.create(path, None).close()
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("DROP TABLE log")
+        raw.commit()
+    finally:
+        raw.close()
+
+    reopened = Database.open(path, None)
+    try:
+        reopened.append_log(_entry("after-upgrade"))
+        assert reopened.count_log() == 1
+    finally:
+        reopened.close()

@@ -30,7 +30,14 @@ from pathlib import Path
 
 from rich.console import Console
 
-from confirm_env import __version__, migrate, picker, providers, sidecar
+from confirm_env import (
+    __version__,
+    log,
+    migrate,
+    picker,
+    providers,
+    sidecar,
+)
 from confirm_env.database import Database, UnlockError
 from confirm_env.editor import EditorApp
 from confirm_env.sidecar import Sidecar
@@ -308,6 +315,7 @@ def run_command(
     )
     try:
         variables = database.list_env()
+        database.append_log(log.capture(command))
     finally:
         database.close()
     environment = dict(os.environ)

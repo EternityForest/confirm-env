@@ -1,13 +1,14 @@
-"""Encrypted storage for environment variables and metadata.
+"""Encrypted storage for environment variables, metadata and the run log.
 
 The store is a SQLCipher database. When a raw key is supplied the database
 is encrypted; when it is not (the "no passphrase" case) the store is an
 ordinary SQLite database and SQLCipher is bypassed entirely.
 
-Two tables are used:
+Three tables are used:
 
 ``env``       the environment variables, ``key``/``value``.
 ``metadata``  free-form user metadata (notes, description, ...).
+``log``       an append-only audit trail of commands that have been run.
 
 Application settings live in the sidecar file instead, because some of them
 must be readable before the encrypted database is opened.
@@ -20,6 +21,8 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from sqlcipher3 import dbapi2 as sqlcipher
+
+from confirm_env import log
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -39,8 +42,17 @@ CREATE TABLE IF NOT EXISTS metadata (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    command   TEXT NOT NULL,
+    username  TEXT NOT NULL,
+    workdir   TEXT NOT NULL,
+    hostname  TEXT NOT NULL
+);
 """
 
+#: Tables the generic key/value helpers are allowed to touch.
 _TABLES = frozenset({"env", "metadata"})
 
 #: SQLCipher format used by legacy stores written before we recorded the
@@ -99,12 +111,6 @@ class Database:
         if path.exists() and path.stat().st_size > 0:
             raise FileExistsError(f"database already exists: {path}")
         connection = cls._connect(path, key, cipher_compatibility)
-        try:
-            connection.executescript(_SCHEMA)
-            connection.commit()
-        except BaseException:
-            connection.close()
-            raise
         return cls(connection, encrypted=key is not None, key=key)
 
     @classmethod
@@ -160,6 +166,11 @@ class Database:
             connection.execute("PRAGMA synchronous = FULL")
             # Touch the schema; with a wrong key SQLCipher raises here.
             connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            # Bring older stores up to date: every statement is
+            # ``IF NOT EXISTS``, so this only adds tables that are missing
+            # (for example the ``log`` table on a pre-logging store).
+            connection.executescript(_SCHEMA)
+            connection.commit()
         except sqlcipher.DatabaseError as exc:
             connection.close()
             raise UnlockError(
@@ -250,6 +261,68 @@ class Database:
 
     def replace_metadata(self, metadata: Mapping[str, str]) -> None:
         self._replace("metadata", metadata)
+
+    # -- run log -----------------------------------------------------------
+
+    def append_log(self, entry: log.LogEntry) -> None:
+        """Append ``entry`` to the run log, trimming the oldest if needed.
+
+        The log is capped at :data:`confirm_env.log.MAX_ENTRIES`; once it
+        grows past that the oldest :data:`confirm_env.log.TRIM_ENTRIES`
+        rows are dropped so the encrypted store cannot grow without bound.
+        """
+        with self._connection:
+            self._connection.execute(
+                "INSERT INTO log "
+                "(timestamp, command, username, workdir, hostname) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    entry.timestamp,
+                    entry.command,
+                    entry.username,
+                    entry.workdir,
+                    entry.hostname,
+                ),
+            )
+            count = self.count_log()
+            if count > log.MAX_ENTRIES:
+                self._connection.execute(
+                    "DELETE FROM log WHERE id IN ("
+                    "SELECT id FROM log ORDER BY id ASC LIMIT ?"
+                    ")",
+                    (log.TRIM_ENTRIES,),
+                )
+
+    def count_log(self) -> int:
+        """Return the number of rows in the run log."""
+        row = self._connection.execute("SELECT count(*) FROM log").fetchone()
+        return int(row[0])
+
+    def log_page(self, offset: int, limit: int) -> list[log.LogEntry]:
+        """Return ``limit`` log entries starting at ``offset``.
+
+        Entries are ordered newest first, so page zero is the most recent
+        command.
+        """
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        cursor = self._connection.execute(
+            "SELECT timestamp, command, username, workdir, hostname "
+            "FROM log ORDER BY id DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return [
+            log.LogEntry(
+                timestamp=row["timestamp"],
+                command=row["command"],
+                username=row["username"],
+                workdir=row["workdir"],
+                hostname=row["hostname"],
+            )
+            for row in cursor
+        ]
 
     # -- generic table helpers --------------------------------------------
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import shlex
 import shutil
 import sys
 from dataclasses import replace
@@ -16,6 +17,13 @@ from confirm_env.database import Database
 from confirm_env.sidecar import LockSettings
 
 PASSPHRASE = "pw"
+
+
+def _open_store(path: Path) -> Database:
+    """Open a store written by the CLI, deriving its key from the sidecar."""
+    record = sidecar.load(path)
+    key = record.derive_key(PASSPHRASE) if record.encrypted else None
+    return Database.open(path, key, record.cipher_compatibility)
 
 
 @pytest.fixture
@@ -92,6 +100,33 @@ def test_run_command_not_found(
 ) -> None:
     assert cli.main([str(store), "definitely-not-a-real-command-xyz"]) == 1
     assert "not found" in capsys.readouterr().out
+
+
+def test_run_command_logs_entry(store: Path) -> None:
+    program = "pass"
+    command = [sys.executable, "-c", program]
+    assert cli.main([str(store), *command]) == 0
+
+    database = _open_store(store)
+    try:
+        entries = database.log_page(0, 10)
+    finally:
+        database.close()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.command == shlex.join(command)
+    assert entry.username
+    assert entry.hostname
+    assert entry.workdir == str(Path.cwd())
+
+
+def test_print_env_does_not_log(store: Path) -> None:
+    assert cli.main(["--print", str(store)]) == 0
+    database = _open_store(store)
+    try:
+        assert database.count_log() == 0
+    finally:
+        database.close()
 
 
 def test_missing_store(

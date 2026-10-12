@@ -7,6 +7,7 @@ The package is split into small, single-purpose modules:
 ``atomicwrite`` atomic, durable file writes shared by the config files.
 ``sidecar``     the TOML file that records the KDF salt and parameters.
 ``database``    the SQLCipher-backed store for variables, metadata, settings.
+``log``         the bounded audit trail of commands that have been run.
 ``migrate``     re-encryption to a new passphrase and current cipher format.
 ``unlock``      interactive unlocking: target banner, delay, passphrase.
 ``editor``      the Textual GUI for editing a store.

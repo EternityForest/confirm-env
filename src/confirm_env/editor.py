@@ -22,14 +22,14 @@ from textual.widgets import (
     TabPane,
 )
 
-from confirm_env import migrate, sidecar
+from confirm_env import log, migrate, sidecar
 from confirm_env.database import Database
 from confirm_env.migrate import MigrationError
 from confirm_env.sidecar import LockSettings, Sidecar
 
 """The Textual GUI for editing a confirm-env store.
 
-The editor has two pages inside a :class:`TabbedContent`:
+The editor has three pages inside a :class:`TabbedContent`:
 
 * **Variables** - a table of environment variables that can be added,
   edited and deleted. Add/edit use a modal dialog; delete asks for
@@ -37,6 +37,8 @@ The editor has two pages inside a :class:`TabbedContent`:
 * **Metadata & Settings** - free-form metadata (edited with the same
   key/value table), the unlock splash title and description, and
   application settings such as the unlock delay and math lock.
+* **Log** - a read-only, paginated view of the commands that have been
+  run against the store.
 
 Nothing is written back to the database until the user saves, and quitting
 with unsaved changes asks for confirmation first.
@@ -468,6 +470,104 @@ class MetadataPane(Widget):
             self.post_message(self.ChangePassphraseRequested())
 
 
+class LogPane(Widget):
+    """A read-only, paginated view of the store's run log."""
+
+    DEFAULT_CSS = """
+    LogPane {
+        height: 1fr;
+        padding: 1;
+    }
+    LogPane DataTable {
+        height: 1fr;
+    }
+    LogPane #log-actions {
+        height: auto;
+        padding: 1 0 0 0;
+    }
+    LogPane #log-page {
+        width: 1fr;
+        content-align: left middle;
+        padding: 0 1;
+    }
+    """
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        widget_id: str | None = None,
+    ) -> None:
+        super().__init__(id=widget_id)
+        self._database = database
+        self._page = 0
+
+    @override
+    def compose(self) -> ComposeResult:
+        yield DataTable(id="log-rows", cursor_type="row", zebra_stripes=True)
+        with Horizontal(id="log-actions"):
+            yield Button("Previous", id="log-previous")
+            yield Button("Next", id="log-next")
+            yield Label("", id="log-page")
+            yield Button("Refresh", id="log-refresh")
+
+    def on_mount(self) -> None:
+        self.query_one(DataTable).add_columns(
+            "Time",
+            "Command",
+            "User",
+            "Directory",
+            "Host",
+        )
+        self.show_page(0)
+
+    def set_database(self, database: Database) -> None:
+        """Point the pane at a new connection, e.g. after a rekey."""
+        self._database = database
+        if self.is_mounted:
+            self.show_page(self._page)
+
+    @property
+    def page_count(self) -> int:
+        """The number of pages, at least one even when the log is empty."""
+        total = self._database.count_log()
+        return max(1, (total + log.PAGE_SIZE - 1) // log.PAGE_SIZE)
+
+    def show_page(self, page: int) -> None:
+        """Show ``page`` (zero-based), clamped to the available range."""
+        self._page = max(0, min(page, self.page_count - 1))
+        table = self.query_one(DataTable)
+        table.clear()
+        entries = self._database.log_page(
+            self._page * log.PAGE_SIZE,
+            log.PAGE_SIZE,
+        )
+        for entry in entries:
+            table.add_row(
+                entry.timestamp,
+                entry.command,
+                entry.username,
+                entry.workdir,
+                entry.hostname,
+            )
+        total = self._database.count_log()
+        self.query_one("#log-page", Label).update(
+            f"Page {self._page + 1} of {self.page_count} ({total} entries)"
+        )
+        self.query_one("#log-previous", Button).disabled = self._page == 0
+        self.query_one("#log-next", Button).disabled = (
+            self._page >= self.page_count - 1
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "log-previous":
+            self.show_page(self._page - 1)
+        elif event.button.id == "log-next":
+            self.show_page(self._page + 1)
+        elif event.button.id == "log-refresh":
+            self.show_page(self._page)
+
+
 class EditorApp(App[None]):
     """The confirm-env GUI."""
 
@@ -529,6 +629,8 @@ class EditorApp(App[None]):
                 yield KeyValueEditor(widget_id="variables")
             with TabPane("Metadata & Settings", id="tab-metadata"):
                 yield MetadataPane(widget_id="metadata")
+            with TabPane("Log", id="tab-log"):
+                yield LogPane(self._database, widget_id="log")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -625,6 +727,7 @@ class EditorApp(App[None]):
                 old_key,
                 old_compatibility,
             )
+            self._sync_log_pane()
             self.notify(
                 f"Passphrase change failed: {exc}",
                 severity="error",
@@ -637,7 +740,12 @@ class EditorApp(App[None]):
             new_record.cipher_compatibility,
         )
         self._sidecar = new_record
+        self._sync_log_pane()
         self.notify("Passphrase changed")
+
+    def _sync_log_pane(self) -> None:
+        """Point the log view at the current connection after a rekey."""
+        self.query_one("#log", LogPane).set_database(self._database)
 
     def action_request_quit(self) -> None:
         if not self._dirty:

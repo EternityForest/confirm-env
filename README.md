@@ -123,15 +123,27 @@ $ CONFIRM_ENV_PROVIDERS="work:/mnt/usb/secrets.db" \
 ## Editing
 
 `confirm-env -e FILE` opens a [Textual](https://textual.textualize.io) GUI
-with two pages:
+with three pages:
 
 * **Variables** — add, edit and delete environment variables. Deleting asks
   for confirmation.
 * **Metadata & Settings** — free-form metadata, the unlock splash title and
   description, plus the unlock delay and math lock.
+* **Log** — a read-only, paginated view of the store's run log.
 
 Changes are written with `Ctrl-S`; quitting with unsaved changes asks for
 confirmation.
+
+## Run log
+
+Every command run through `confirm-env` is recorded inside the encrypted
+database: the command line, the local time, the username, the working
+directory and the hostname. The **Log** page of the editor shows these
+newest-first, one page at a time.
+
+The log is bounded so the store cannot grow without limit: once it holds
+more than 1000 entries, the 100 oldest are dropped. `--print` and editing a
+store do not add entries.
 
 ## License
 
