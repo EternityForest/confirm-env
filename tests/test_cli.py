@@ -341,7 +341,7 @@ def test_run_editor_rejects_orphan_database(tmp_path: Path) -> None:
     path = tmp_path / "orphan.db"
     path.write_bytes(b"not a database")
     with pytest.raises(cli.CliError):
-        cli.run_editor(path, None, _console())
+        cli.run_editor(path, _console())
 
 
 def test_edit_mode_ignores_title_and_description(

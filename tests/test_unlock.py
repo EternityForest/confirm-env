@@ -9,7 +9,7 @@ from collections.abc import Iterator
 import pytest
 from rich.console import Console
 
-from confirm_env import unlock
+from confirm_env import delay, key_listener, unlock
 
 
 def _console() -> Console:
@@ -22,16 +22,16 @@ def _reader(values: list[str]) -> object:
 
 
 def test_confirm_delay_zero_returns_true() -> None:
-    assert unlock.confirm_delay(0) is True
+    assert delay.confirm_delay(0) is True
 
 
 def test_confirm_delay_negative_raises() -> None:
     with pytest.raises(ValueError):
-        unlock.confirm_delay(-1)
+        delay.confirm_delay(-1)
 
 
 def test_confirm_delay_cancel_is_immediate() -> None:
-    cancelled = unlock.confirm_delay(
+    cancelled = delay.confirm_delay(
         5,
         console=_console(),
         cancel_check=lambda: True,
@@ -40,15 +40,15 @@ def test_confirm_delay_cancel_is_immediate() -> None:
 
 
 def test_confirm_delay_completes() -> None:
-    assert unlock.confirm_delay(0.05, console=_console()) is True
+    assert delay.confirm_delay(0.05, console=_console()) is True
 
 
 def test_key_listener_is_noop_without_tty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_stdin = types.SimpleNamespace(isatty=lambda: False, fileno=lambda: 0)
-    monkeypatch.setattr(unlock.sys, "stdin", fake_stdin)
-    with unlock.KeyListener() as listener:
+    monkeypatch.setattr(key_listener.sys, "stdin", fake_stdin)
+    with delay.KeyListener() as listener:
         assert listener.cancelled() is False
 
 
