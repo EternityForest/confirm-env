@@ -20,11 +20,13 @@ test: ## Run the test suite.
 check: lint test ## Run everything CI runs.
 
 build: ## Build a source and wheel distribution.
+	rm -rf dist/*.whl
+	rm -rf dist/*.tar.gz
 	uv build
 
 clean: ## Remove build and cache artifacts.
 	rm -rf build dist .pytest_cache .ruff_cache
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
-publish:
+publish: build ## Publish to PyPi.
 	confirm-env --delay 3 --provider confirm-env-twine-upload --title "confirm-env -> PyPi" twine upload dist/*
