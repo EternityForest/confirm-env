@@ -25,3 +25,6 @@ build: ## Build a source and wheel distribution.
 clean: ## Remove build and cache artifacts.
 	rm -rf build dist .pytest_cache .ruff_cache
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+
+publish:
+	confirm-env --delay 3 --provider confirm-env-twine-upload --title "confirm-env -> PyPi" twine upload dist/*

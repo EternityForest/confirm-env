@@ -64,19 +64,27 @@ for a configurable delay (default **5 seconds**). Press `q`, `Esc` or
 `Ctrl-C` to cancel. The delay lives in the sidecar and can be changed on the
 **Metadata & Settings** page of the editor.
 
+
+
 ## Math lock
 
 A store can require a small addition challenge before it will unlock, to
 catch an absent-minded invocation. Set the number of digits (the width of
-each addend) on the **Metadata & Settings** page; `0` disables the lock. The
-challenge shares the passphrase's three-attempt budget, so a wrong answer
-counts against the same limit.
+each addend) on the **Metadata & Settings** page; `0` disables the lock.
+
+
+## Pre-run delay
+
+With the `--delay 5` syntax, you can add an extra delay after all user interation
+is done, to give the user time to realize the terrible mistake they made and cancel it.
 
 ## Database splash
 
 A store can carry a title and a description, shown just before the
 passphrase prompt so you can see exactly which store you are about to
-open. Both live in the sidecar and can be set on the **Metadata &
+open. 
+
+Both live in the sidecar and can be set on the **Metadata &
 Settings** page of the editor; leaving them empty hides the splash.
 
 ## Command splash

@@ -43,12 +43,12 @@ from confirm_env import (
     sidecar,
 )
 from confirm_env.database import Database, UnlockError
+from confirm_env.delay import confirm_delay
 from confirm_env.editor import EditorApp
 from confirm_env.sidecar import Sidecar
 from confirm_env.unlock import (
     announce_command_splash,
     announce_target,
-    confirm_delay,
     prompt_math_lock,
     prompt_new_passphrase,
     prompt_passphrase,
@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_delay_seconds,
         default=None,
         metavar="SECONDS",
-        help="override the configured unlock delay",
+        help="Extra delay after fully unlocking, before running the command",
     )
     parser.add_argument(
         "--title",
@@ -191,7 +191,6 @@ def unlock_store(
     store: Path,
     *,
     command: list[str] | None = None,
-    delay_override: float | None = None,
     console: Console | None = None,
 ) -> tuple[Database, Sidecar]:
     """Announce, delay, prompt and open an existing store."""
@@ -211,11 +210,8 @@ def unlock_store(
     announce_target(store, command=command, console=console)
     if not record.encrypted:
         return Database.open(store, None), record
-    delay = (
-        record.lock_settings.unlock_delay
-        if delay_override is None
-        else delay_override
-    )
+    delay = record.lock_settings.unlock_delay
+
     if not confirm_delay(
         delay,
         description=f"Unlocking {store.name}",
@@ -247,14 +243,12 @@ def unlock_store(
 
 def run_editor(
     store: Path,
-    delay_override: float | None,
     console: Console,
 ) -> int:
     """Open the editor, creating the store if it does not exist."""
     if sidecar.exists(store):
         database, record = unlock_store(
             store,
-            delay_override=delay_override,
             console=console,
         )
     elif store.exists():
@@ -273,13 +267,11 @@ def run_editor(
 
 def print_env(
     store: Path,
-    delay_override: float | None,
     console: Console,
 ) -> int:
     """Print the store's variables as shell ``export`` lines."""
     database, _ = unlock_store(
         store,
-        delay_override=delay_override,
         console=console,
     )
     try:
@@ -294,8 +286,8 @@ def print_env(
 def run_command(
     store: Path,
     command: list[str],
-    delay_override: float | None,
     console: Console,
+    extra_delay: float | None = None,
     *,
     title: str | None = None,
     description: str | None = None,
@@ -310,7 +302,6 @@ def run_command(
     database, _ = unlock_store(
         store,
         command=command,
-        delay_override=delay_override,
         console=console,
     )
     try:
@@ -318,6 +309,13 @@ def run_command(
         database.append_log(log.capture(command))
     finally:
         database.close()
+
+    if (extra_delay is not None) and not confirm_delay(
+            extra_delay,
+            description="About to run command",
+            console=console,
+        ):
+            raise UserCancelledError
     environment = dict(os.environ)
     environment.update(variables)
     try:
@@ -391,11 +389,11 @@ def main(argv: list[str] | None = None) -> int:
         if store is None:
             parser.error("a FILE is required, or use --provider NAME")
         if args.edit:
-            return run_editor(store, args.delay, console)
+            return run_editor(store, console)
         if args.print_env:
             if command:
                 parser.error("--print does not accept a command")
-            return print_env(store, args.delay, console)
+            return print_env(store, console)
         if not command:
             parser.error(
                 "a command is required, or use -e/--edit to edit the store",
@@ -403,9 +401,9 @@ def main(argv: list[str] | None = None) -> int:
         return run_command(
             store,
             command,
-            args.delay,
             console,
             title=args.title,
+            extra_delay=args.delay,
             description=args.description,
         )
     except UserCancelledError:
