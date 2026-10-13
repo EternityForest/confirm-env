@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import ClassVar, override
+from typing import TYPE_CHECKING, ClassVar, override
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
@@ -21,11 +21,15 @@ from textual.widgets import (
     TabbedContent,
     TabPane,
 )
+from textual_fspicker import FileOpen
 
 from confirm_env import log, migrate, sidecar
 from confirm_env.database import Database
 from confirm_env.migrate import MigrationError
 from confirm_env.sidecar import LockSettings, Sidecar
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 """The Textual GUI for editing a confirm-env store.
 
@@ -44,9 +48,36 @@ Nothing is written back to the database until the user saves, and quitting
 with unsaved changes asks for confirmation first.
 """
 
+#: Shared styling for the modal dialogs, reused by every editor app.
+DIALOG_CSS = """
+.dialog {
+    width: 60;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+.dialog-title {
+    text-style: bold;
+    padding: 0 0 1 0;
+}
+.dialog-buttons {
+    height: auto;
+    align-horizontal: right;
+    padding: 1 0 0 0;
+}
+.dialog-buttons Button {
+    margin-left: 2;
+}
+"""
+
 
 class EditRowScreen(ModalScreen[tuple[str, str] | None]):
-    """A modal dialog for adding or editing one key/value row."""
+    """A modal dialog for adding or editing one key/value row.
+
+    When ``value_editable`` is false the value is not typed here; the
+    caller collects it separately (for example with a file browser).
+    """
 
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", "Cancel")
@@ -65,12 +96,14 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
         name: str = "",
         value: str = "",
         name_editable: bool = True,
+        value_editable: bool = True,
     ) -> None:
         super().__init__()
         self._title = title
         self._initial_name = name
         self._initial_value = value
         self._name_editable = name_editable
+        self._value_editable = value_editable
 
     @override
     def compose(self) -> ComposeResult:
@@ -82,8 +115,9 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
                 id="row-name",
                 disabled=not self._name_editable,
             )
-            yield Label("Value")
-            yield Input(value=self._initial_value, id="row-value")
+            if self._value_editable:
+                yield Label("Value")
+                yield Input(value=self._initial_value, id="row-value")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Save", variant="primary", id="save")
                 yield Button("Cancel", id="cancel")
@@ -92,8 +126,10 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
         name_input = self.query_one("#row-name", Input)
         if self._name_editable and not self._initial_name:
             name_input.focus()
-        else:
+        elif self._value_editable:
             self.query_one("#row-value", Input).focus()
+        else:
+            self.query_one("#save", Button).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "save":
@@ -109,10 +145,14 @@ class EditRowScreen(ModalScreen[tuple[str, str] | None]):
 
     def _submit(self) -> None:
         name = self.query_one("#row-name", Input).value.strip()
-        value = self.query_one("#row-value", Input).value
         if not name:
             self.notify("Name must not be empty", severity="error")
             return
+        value = (
+            self.query_one("#row-value", Input).value
+            if self._value_editable
+            else ""
+        )
         self.dismiss((name, value))
 
 
@@ -251,6 +291,7 @@ class KeyValueEditor(Widget):
         name_editable: bool = True,
         value_label: str = "Value",
         add_label: str = "Add",
+        pick_value: bool = False,
         widget_id: str | None = None,
     ) -> None:
         super().__init__(id=widget_id)
@@ -258,6 +299,7 @@ class KeyValueEditor(Widget):
         self._name_editable = name_editable
         self._value_label = value_label
         self._add_label = add_label
+        self._pick_value = pick_value
 
     @override
     def compose(self) -> ComposeResult:
@@ -298,6 +340,16 @@ class KeyValueEditor(Widget):
     # -- actions -----------------------------------------------------------
 
     def action_add(self) -> None:
+        if self._pick_value:
+            self.app.push_screen(
+                EditRowScreen(
+                    title=self._add_label,
+                    name_editable=self._name_editable,
+                    value_editable=False,
+                ),
+                self._on_add_name,
+            )
+            return
         self.app.push_screen(
             EditRowScreen(
                 title=self._add_label,
@@ -310,6 +362,12 @@ class KeyValueEditor(Widget):
         name = self._selected_name()
         if name is None:
             self.notify("Nothing selected", severity="warning")
+            return
+        if self._pick_value:
+            self._browse(
+                self._rows[name],
+                lambda chosen: self._finish_pick(name, chosen),
+            )
             return
         self.app.push_screen(
             EditRowScreen(
@@ -355,6 +413,35 @@ class KeyValueEditor(Widget):
         self._rows[name] = value
         self._rebuild()
         self.post_message(self.Changed())
+
+    def _on_add_name(self, result: tuple[str, str] | None) -> None:
+        """Second step of an add when the value comes from a picker."""
+        if result is None:
+            return
+        name, _ = result
+        self._browse(
+            "",
+            lambda chosen: self._finish_pick(name, chosen),
+        )
+
+    def _finish_pick(self, name: str, chosen: Path | None) -> None:
+        """Record the path chosen in the file browser, if any."""
+        if chosen is None or str(chosen) == self._rows.get(name):
+            return
+        self._rows[name] = str(chosen)
+        self._rebuild()
+        self.post_message(self.Changed())
+
+    def _browse(
+        self,
+        initial: str,
+        callback: Callable[[Path | None], None],
+    ) -> None:
+        """Open a file browser, starting near ``initial`` when given."""
+        location = Path(initial).expanduser().parent if initial else Path.cwd()
+        if not location.is_dir():
+            location = Path.cwd()
+        self.app.push_screen(FileOpen(location=location), callback)
 
     def _on_edit(self, result: tuple[str, str] | None) -> None:
         if result is None:
@@ -579,30 +666,14 @@ class EditorApp(App[None]):
         Binding("ctrl+q", "request_quit", "Quit"),
     ]
 
-    CSS = """
-    .dialog {
-        width: 60;
-        height: auto;
-        border: thick $accent;
-        background: $surface;
-        padding: 1 2;
-    }
-    .dialog-title {
-        text-style: bold;
-        padding: 0 0 1 0;
-    }
-    .dialog-buttons {
-        height: auto;
-        align-horizontal: right;
-        padding: 1 0 0 0;
-    }
-    .dialog-buttons Button {
-        margin-left: 2;
-    }
+    CSS = (
+        DIALOG_CSS
+        + """
     #variables {
         padding: 1;
     }
     """
+    )
 
     def __init__(
         self,

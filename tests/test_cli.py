@@ -520,3 +520,35 @@ def test_provider_picker_cancel_is_cancelled(
 def test_missing_file_and_provider_is_error() -> None:
     with pytest.raises(SystemExit):
         cli.main([])
+
+
+def test_edit_providers_launches_editor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: list[bool] = []
+
+    def fake_editor() -> int:
+        called.append(True)
+        return 0
+
+    monkeypatch.setattr(cli, "run_providers_editor", fake_editor)
+
+    assert cli.main(["--edit-providers"]) == 0
+    assert called == [True]
+
+
+def test_run_providers_editor_runs_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubApp:
+        def __init__(self) -> None:
+            self.ran = False
+
+        def run(self) -> None:
+            self.ran = True
+
+    stub = StubApp()
+    monkeypatch.setattr(cli.providers_editor, "ProvidersApp", lambda: stub)
+
+    assert cli.run_providers_editor() == 0
+    assert stub.ran

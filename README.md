@@ -111,6 +111,15 @@ If a name is not known, an interactive `confirm-env` shows a Textual file
 picker and remembers the choice; in a non-interactive session it fails with
 a clear error.
 
+`confirm-env --edit-providers` opens a GUI listing every provider in the
+same key/value table used for a store's variables. Adding or editing one
+picks the store with the same file browser, so a provider can never be saved
+pointing at a path that does not exist.
+
+```console
+$ confirm-env --edit-providers
+```
+
 You can bypass the lookup entirely with the `CONFIRM_ENV_PROVIDERS`
 environment variable, which takes a comma-separated list of `name:file`
 pairs:

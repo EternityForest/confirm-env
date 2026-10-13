@@ -15,6 +15,9 @@ Modes:
 ``confirm-env --set-provider NAME FILE``
     Record ``FILE`` as the store for ``NAME`` and exit.
 
+``confirm-env --edit-providers``
+    Open a GUI for adding, editing and deleting saved providers.
+
 All options must appear before the store; everything after it is the
 command and its arguments.
 """
@@ -36,6 +39,7 @@ from confirm_env import (
     migrate,
     picker,
     providers,
+    providers_editor,
     sidecar,
 )
 from confirm_env.database import Database, UnlockError
@@ -109,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar=("NAME", "FILE"),
         help="record FILE as the store for provider NAME and exit",
+    )
+    parser.add_argument(
+        "--edit-providers",
+        action="store_true",
+        help="open the GUI for editing saved providers and exit",
     )
     parser.add_argument(
         "--delay",
@@ -328,6 +337,12 @@ def run_set_provider(name: str, store: Path, console: Console) -> int:
     return 0
 
 
+def run_providers_editor() -> int:
+    """Open the GUI for editing the saved providers."""
+    providers_editor.ProvidersApp().run()
+    return 0
+
+
 def resolve_provider(name: str, console: Console) -> Path:
     """Resolve ``name`` to a store path, opening a picker when unknown."""
     resolved = providers.lookup(name)
@@ -362,6 +377,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.set_provider is not None:
             name, store = args.set_provider
             return run_set_provider(name, Path(store), console)
+        if args.edit_providers:
+            return run_providers_editor()
         command = list(args.command)
         store = args.file
         if args.provider is not None:
