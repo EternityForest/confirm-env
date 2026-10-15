@@ -162,6 +162,13 @@ The log is bounded so the store cannot grow without limit: once it holds
 more than 1000 entries, the 100 oldest are dropped. `--print` and editing a
 store do not add entries.
 
+## Real TTY Requirements
+
+To avoid temptation to bypass it, `confirm-env` will not allow any action that would normally require the unlock process unless the stdin is a TTY, blocking piped input scripts.
+
+You can get around this with more involved simulated terminals, but future updates will likely have code to detect some of those too.
+
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
