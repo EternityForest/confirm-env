@@ -194,6 +194,15 @@ def unlock_store(
     console: Console | None = None,
 ) -> tuple[Database, Sidecar]:
     """Announce, delay, prompt and open an existing store."""
+
+    if not sys.stdin:
+        raise RuntimeError(
+            "No stdin available; cannot unlock in a non-interactive environment")
+    
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "Cannot unlock in a non-interactive environment or with piped input")
+
     console = console or Console()
     migrate.recover(store)
     if not sidecar.exists(store):

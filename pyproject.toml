@@ -1,6 +1,6 @@
 [project]
 name = "confirm-env"
-version = "0.1.0"
+version = "0.2.0"
 description = "Run commands with environment variables kept in an encrypted SQLCipher database."
 readme = "README.md"
 license = "MIT"
