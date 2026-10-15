@@ -63,6 +63,8 @@ EXIT_CANCELLED = 130
 #: How many times to re-prompt after a wrong passphrase.
 MAX_ATTEMPTS = 3
 
+allow_non_tty_stdin = False
+
 
 class CliError(Exception):
     """A user facing error, printed without a traceback."""
@@ -194,14 +196,16 @@ def unlock_store(
     console: Console | None = None,
 ) -> tuple[Database, Sidecar]:
     """Announce, delay, prompt and open an existing store."""
+    global allow_non_tty_stdin
 
     if not sys.stdin:
         raise RuntimeError(
-            "No stdin available; cannot unlock in a non-interactive environment")
+            "No stdin available; cannot unlock.")
     
-    if not sys.stdin.isatty():
-        raise RuntimeError(
-            "Cannot unlock in a non-interactive environment or with piped input")
+    if not allow_non_tty_stdin:
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "Cannot unlock in a non-interactive environment or with piped input")
 
     console = console or Console()
     migrate.recover(store)

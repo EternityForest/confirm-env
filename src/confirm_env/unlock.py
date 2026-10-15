@@ -26,9 +26,6 @@ from .key_listener import KeyListener
 SPLASH_CANCEL_KEYS = frozenset({"\x1b", "\x03"})
 
 
-
-
-
 def announce_target(
     store: Path,
     *,

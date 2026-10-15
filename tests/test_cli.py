@@ -57,6 +57,19 @@ def _fast_unlock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "prompt_passphrase", lambda *a, **k: PASSPHRASE)
 
 
+def test_allow_non_tty(store: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert not cli.allow_non_tty_stdin
+    #side effect in test is a bit hacky...
+    cli.allow_non_tty_stdin = True
+
+
+def test_nontty_fail(store: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli.allow_non_tty_stdin = False
+    with pytest.raises(RuntimeError):
+        cli.main(["--print", str(store)])
+    cli.allow_non_tty_stdin = True
+
+
 def test_print_env(store: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert cli.main(["--print", str(store)]) == 0
     out = capsys.readouterr().out
